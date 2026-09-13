@@ -1,0 +1,44 @@
+[
+  {
+    "file": "cmake.tgz",
+    "url": "https://codeload.github.com/bkaradzic/bgfx.cmake/tar.gz/7cea9ab17c6dc8745cdc5df992145c514a129abb",
+    "sha256": "492f73b35485bea634405eade89c92e3a87e49e5c86ab1e0e072249b716ee430",
+    "destination": "source"
+  },
+  {
+    "file": "bgfx.tgz",
+    "url": "https://codeload.github.com/bkaradzic/bgfx/tar.gz/9b636df330c81e11c84595651a291b6c59fb7396",
+    "sha256": "c54ce3a4f0a4903192911e351d3f7b0a3bb6f195b46815f8464f3ceb9e2600d5",
+    "destination": "source/bgfx"
+  },
+  {
+    "file": "bx.tgz",
+    "url": "https://codeload.github.com/bkaradzic/bx/tar.gz/98ad3bec2a7ee1a5cbabdcabc25252572dcb1d88",
+    "sha256": "1c9cd3b2434904fe24b5079327999912b3ed737b106caf82f6678f1f6026568f",
+    "destination": "source/bx"
+  },
+  {
+    "file": "bimg.tgz",
+    "url": "https://codeload.github.com/bkaradzic/bimg/tar.gz/ddbeeae05779f84f97694553eb41605a60f86f0a",
+    "sha256": "290f736a93960e17f26bc80179c702598231db3b0c34ac0b0f0d8a87ea1ad039",
+    "destination": "source/bimg"
+  },
+  {
+    "file": "imgui.tgz",
+    "url": "https://codeload.github.com/ocornut/imgui/tar.gz/refs/tags/v1.91.9b-docking",
+    "sha256": "466fdef9b18de15f0bb6e288e3d00ffa3d82200ec458ce5e4f724a161d9528a5",
+    "destination": "imgui"
+  },
+  {
+    "file": "sdl3.tgz",
+    "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.4.16.tar.gz",
+    "sha256": "7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68",
+    "destination": "sdl3"
+  },
+  {
+    "file": "sdl3-vc.zip",
+    "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-devel-3.4.16-VC.zip",
+    "sha256": "1a784cb2a5c64d56fe7a62090fe9d242d9865f235e4ea9678f1a6ba4e693e7de",
+    "destination": "SDL3-3.4.16"
+  }
+]

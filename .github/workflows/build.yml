@@ -1,0 +1,157 @@
+name: Build packages
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  editor:
+    needs: source
+    name: Editor (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: windows-x64
+          - os: ubuntu-24.04
+            platform: linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libgl1-mesa-dev libegl1-mesa-dev libasound2-dev libpulse-dev libudev-dev
+      - name: Download pinned dependencies
+        run: cmake -P cmake/DownloadDependencies.cmake
+      - name: Build Windows editor
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS_INSTALL=%%i"
+          call "%VS_INSTALL%\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cmake -S dependencies/source -B dependencies/graphics -G Ninja -DCMAKE_BUILD_TYPE=Release -DBGFX_BUILD_EXAMPLES=OFF -DBGFX_WITH_WAYLAND=OFF -DBGFX_AMALGAMATED=ON
+          if errorlevel 1 exit /b 1
+          cmake --build dependencies/graphics --target bgfx bimg bx shaderc --parallel 2
+          if errorlevel 1 exit /b 1
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTUDIO_GRAPHICS_SOURCE=dependencies/source -DSTUDIO_GRAPHICS_BUILD=dependencies/graphics -DSTUDIO_IMGUI_SOURCE=dependencies/imgui -DSDL3_DIR=dependencies/SDL3-3.4.16/cmake
+          if errorlevel 1 exit /b 1
+          cmake --build build --target usum-viewport --parallel 2
+          if errorlevel 1 exit /b 1
+      - name: Build Linux editor
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S dependencies/source -B dependencies/graphics -G Ninja -DCMAKE_BUILD_TYPE=Release -DBGFX_BUILD_EXAMPLES=OFF -DBGFX_WITH_WAYLAND=OFF -DBGFX_AMALGAMATED=ON
+          cmake --build dependencies/graphics --target bgfx bimg bx shaderc --parallel 2
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTUDIO_GRAPHICS_SOURCE=dependencies/source -DSTUDIO_GRAPHICS_BUILD=dependencies/graphics -DSTUDIO_IMGUI_SOURCE=dependencies/imgui -DSTUDIO_SDL_SOURCE=dependencies/sdl3 -DSDL_WAYLAND=OFF
+          cmake --build build --target usum-viewport --parallel 2
+          ldd build/bin/usum-viewport
+          if ldd build/bin/usum-viewport | grep -q 'not found'; then exit 1; fi
+      - name: Package editor and notices
+        run: python .github/package.py editor --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: USUMStudio-${{ matrix.platform }}
+          path: dist/USUMStudio-${{ matrix.platform }}.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  blender:
+    name: Blender add-ons
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python .github/package.py blender
+      - uses: actions/upload-artifact@v4
+        with:
+          name: USUMStudio-Blender-model
+          path: dist/USUMStudio-Blender-model.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: USUMStudio-Blender-collision
+          path: dist/USUMStudio-Blender-collision.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  source:
+    name: Corresponding source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pinned dependency source
+        run: cmake -P cmake/DownloadDependencies.cmake
+      - name: Package application and dependency source
+        run: python .github/package.py source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: USUMStudio-source
+          path: dist/USUMStudio-source.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  release:
+    name: Publish release
+    needs: [editor, blender, source]
+    if: >-
+      github.event_name != 'pull_request' &&
+      (startsWith(github.ref, 'refs/tags/') ||
+       github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: USUMStudio-*
+          path: dist
+          merge-multiple: true
+      - name: Publish ZIPs as release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=(dist/USUMStudio-windows-x64.zip dist/USUMStudio-linux-x64.zip dist/USUMStudio-Blender-model.zip dist/USUMStudio-Blender-collision.zip dist/USUMStudio-source.zip)
+          for asset in "${assets[@]}"; do
+            test -s "$asset"
+          done
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="$GITHUB_REF_NAME"
+            title="USUMStudio $tag"
+            options=(--verify-tag)
+          else
+            tag="build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            title="USUMStudio build $GITHUB_RUN_NUMBER"
+            options=(--prerelease --latest=false)
+          fi
+          cat > release-notes.md <<'NOTES'
+          Download the Windows or Linux ZIP and extract it before running the editor.
+          Install each Blender add-on ZIP directly through Blender's Install from Disk.
+          The source ZIP includes the matching application and dependency sources.
+          Application: GPLv3. Blender add-ons: GPLv3-or-later. Dependency notices are included.
+          NOTES
+          printf '\nCommit: `%s`\n' "$GITHUB_SHA" >> release-notes.md
+          gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" --title "$title" --notes-file release-notes.md --draft "${options[@]}"
+          gh release edit "$tag" --draft=false
