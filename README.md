@@ -61,6 +61,12 @@ The bundled font notice is in `resources/fonts/LICENSE.txt`. Adapted Pawn opcode
 
 Both Blender add-ons are licensed under GPL-3.0-or-later; see `tools/blender/LICENSE`. This license applies to the add-ons only.
 
-Special Thanks: SPICA devs and pk3DS Devs for model and image format research
+Special Thanks: 
+- SPICA devs for research on the gfmodel format and image formats
+- pk3DS Devs for model and image format research 
+- ZioruaS2 for some research on particles, various formats, and the idea for a Map Authoring system
+- Omikaye for the cursor coordinates idea and extensive Zone Research
+- ABZB for research on general RE research and table compilation
+- VGAudio for BCSTM encode and decode
 
 AI was used in the making of this project for both frontend, some housekeeping, and tutorials.
