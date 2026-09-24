@@ -9,6 +9,7 @@
 #include "native/texture_uv_preview.h"
 #include "scene/texture_channels.h"
 #include <imgui.h>
+#include <utility>
 #include <SDL3/SDL.h>
 #include <fstream>
 #include <cstring>

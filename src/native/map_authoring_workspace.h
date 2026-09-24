@@ -8,6 +8,7 @@
 #include "native/camera.h"
 #include "native/folder_picker.h"
 #include <functional>
+#include <utility>
 #include <future>
 #include <imgui.h>
 #include <set>
