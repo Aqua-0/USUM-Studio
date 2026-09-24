@@ -1,6 +1,7 @@
 #include "authoring/ground_surface.h"
 #include "core/digest.h"
 #include "formats/archive.h"
+#include "assets/material_document.h"
 #include <cmath>
 #include <algorithm>
 #include <set>
@@ -848,6 +849,84 @@ std::vector<GroundTexture> load_ground_textures(const std::filesystem::path &dum
         return ax != ay ? ax > ay : a.name < b.name;
     });
     return result;
+}
+namespace {
+SceneModelSource ground_texture_source(const std::string &key, std::string &hash) {
+    std::istringstream in(key);
+    std::string archive, resource;
+    require(bool(in >> archive >> resource >> hash), "Invalid ground texture reference");
+    in >> std::ws;
+    require(in.eof(), "Unexpected ground texture reference data");
+    std::filesystem::path path(archive);
+    require(!path.is_absolute() && !path.has_root_name() && archive.starts_with("romfs/") &&
+                archive.find(':') == std::string::npos && archive.find('\\') == std::string::npos,
+            "Ground texture must reference a dump archive");
+    for (const auto &part : path)
+        require(part != "..", "Invalid ground texture archive path");
+    require(hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == std::string::npos,
+            "Invalid ground texture source hash");
+    SceneModelSource source;
+    source.archive = path;
+    std::replace(resource.begin(), resource.end(), '/', ' ');
+    std::istringstream indices(resource);
+    require(bool(indices >> source.member), "Invalid ground texture member");
+    std::size_t index;
+    while (indices >> std::ws && !indices.eof()) {
+        require(bool(indices >> index), "Invalid ground texture resource path");
+        require(source.path.size() < 16, "Ground texture nesting is too deep");
+        source.path.push_back(index);
+    }
+    require(!source.path.empty(), "Ground texture resource path is missing");
+    return source;
+}
+std::string borrowed_texture_name(const std::string &key) {
+    return "borrowed-surface/" +
+           sha256(View(reinterpret_cast<const std::uint8_t *>(key.data()), key.size()));
+}
+}
+Bytes ground_texture_resource(const std::filesystem::path &dump, const std::string &key) {
+    std::string hash;
+    auto source = ground_texture_source(key, hash);
+    auto member = Archive(dump / source.archive).decoded(source.member);
+    require(sha256(member) == hash,
+            "A borrowed surface source changed; reopen with the matching dump");
+    return asset_resource(member, source.path);
+}
+void merge_ground_textures(Environment &destination, std::vector<GroundTexture> &palette,
+                           const Environment &source, const std::vector<GroundTexture> &textures) {
+    for (auto item : textures) {
+        if (std::any_of(palette.begin(), palette.end(), [&](auto &existing) {
+                return existing.key == item.key;
+            }))
+            continue;
+        auto name = borrowed_texture_name(item.key);
+        destination.textures[name] = source.textures.at(item.texture);
+        destination.texture_sources[name] = source.texture_sources.at(item.texture);
+        item.texture = name;
+        palette.push_back(std::move(item));
+    }
+}
+void restore_ground_textures(const std::filesystem::path &dump, Environment &scene,
+                             const GroundSurface &ground, std::vector<GroundTexture> &palette,
+                             std::atomic_bool *cancel) {
+    std::set<std::string> keys(ground.textures.begin(), ground.textures.end());
+    for (auto &blend : ground.blends)
+        keys.insert(blend.texture);
+    keys.erase("");
+    for (auto &key : keys) {
+        require(!cancel || !cancel->load(), "Ground texture loading cancelled");
+        if (std::any_of(palette.begin(), palette.end(), [&](auto &item) {
+                return item.key == key;
+            }))
+            continue;
+        auto bytes = ground_texture_resource(dump, key);
+        auto name = borrowed_texture_name(key);
+        auto image = decode_field_texture(bytes);
+        std::string hash;
+        scene.texture_sources[name] = ground_texture_source(key, hash);
+        scene.textures[name] = std::move(image);
+        palette.push_back({key, text(slice(bytes, 40, 64)), name});
+    }
 }
 Environment ground_preview(const Environment &source, const AuthoringGrid &grid,
                            const GroundSurface &ground, const std::vector<GroundTexture> &palette) {

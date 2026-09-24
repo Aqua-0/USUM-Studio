@@ -3,9 +3,12 @@
 #include <array>
 
 namespace studio {
-Bytes decompress(View b) {
-    if (b.empty() || b[0] != 0x11)
+Bytes decompress(View b, std::size_t *consumed) {
+    if (b.empty() || b[0] != 0x11) {
+        if (consumed)
+            *consumed = b.size();
         return {b.begin(), b.end()};
+    }
     std::size_t size = u32(b, 0) >> 8, pos = 4;
     if (!size) {
         size = u32(b, pos);
@@ -44,6 +47,8 @@ Bytes decompress(View b) {
                 out.push_back(out[out.size() - distance]);
         }
     }
+    if (consumed)
+        *consumed = pos;
     return out;
 }
 Bytes compress(View b) {

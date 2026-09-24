@@ -52,7 +52,9 @@ const char *spatial_kind_name(SpatialKind kind) {
         "Ground surfaces",     "Normal walls",      "Water boundaries", "Ride restrictions",
         "Mudsdale boundaries", "Placement shapes",  "Camera regions",   "Camera scroll stops",
         "Zone boundaries",     "Entrances & warps", "Story triggers",   "Scenery interactions",
-        "NPCs & trainers",     "Item pickups",      "Wild encounters"};
+        "NPCs & trainers",     "Item pickups",      "Wild encounters",
+        "Field actions", "Special encounters", "Pedestrian routes", "Berry piles",
+        "Fishing spots", "Poke Finder spots", "Contact Pokemon", "Push-rock puzzles", "Ambient sounds"};
     static_assert(std::size(names) == unsigned(SpatialKind::Count));
     return names[unsigned(kind)];
 }

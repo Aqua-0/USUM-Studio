@@ -139,18 +139,43 @@ std::vector<EmbeddedImage> embedded_images(View b) {
         out.push_back({"", 0, b.size()});
         return out;
     }
-    if (b.size() < 4 || text(b.first(4)) != "ALYT")
+    if (b.size() < 4)
         return out;
-    require(u16(b, 4) == 2, "Unsupported application image package");
-    auto start = std::search(b.begin(), b.end(), "SARC", "SARC" + 4);
-    require(start != b.end(), "Image package has no resource archive");
-    auto base = std::size_t(start - b.begin());
+    std::size_t base = 0;
+    if (text(b.first(4)) == "ALYT") {
+        require(u16(b, 4) == 2, "Unsupported application image package");
+        auto start = std::search(b.begin(), b.end(), "SARC", "SARC" + 4);
+        require(start != b.end(), "Image package has no resource archive");
+        base = std::size_t(start - b.begin());
+    } else if (text(b.first(4)) != "SARC") {
+        // Older layouts have fixed-width resource and pane names before the archive.
+        for (unsigned width : {64u, 32u}) {
+            if (base > b.size() || b.size() - base < 4)
+                return out;
+            auto count = u32(b, base);
+            base += 4;
+            if (count > (b.size() - base) / width)
+                return out;
+            for (unsigned n = 0; n < count; ++n) {
+                auto name = b.subspan(base, width);
+                if (std::find(name.begin(), name.end(), 0) == name.end())
+                    return out;
+                base += width;
+            }
+        }
+        base = aligned(base, 128);
+        if (base > b.size() || b.size() - base < 4 || text(b.subspan(base, 4)) != "SARC")
+            return out;
+    }
+    require(b.size() - base >= 20 && u16(b, base + 4) == 20, "Invalid resource archive header");
     require(u16(b, base + 6) == 0xfeff, "Unsupported resource archive byte order");
     auto end = base + u32(b, base + 8), data = base + u32(b, base + 12),
          table = base + u16(b, base + 4);
-    require(end <= b.size() && data <= end && text(slice(b, table, 4)) == "SFAT",
+    require(end <= b.size() && table <= end && data <= end && text(slice(b, table, 4)) == "SFAT",
             "Invalid image package table");
+    require(end - table >= 12 && u16(b, table + 4) == 12, "Invalid image package node table");
     auto count = u16(b, table + 6);
+    require(count <= (end - table - 12) / 16, "Image package node table out of bounds");
     auto nodes = table + u16(b, table + 4), strings = nodes + std::size_t(count) * 16;
     require(text(slice(b, strings, 4)) == "SFNT", "Invalid image package names");
     strings += u16(b, strings + 4);
@@ -163,7 +188,7 @@ std::vector<EmbeddedImage> embedded_images(View b) {
         auto attr = u32(b, at + 4);
         require(attr >> 24, "Unnamed package image");
         auto name_at = strings + (attr & 0xffffff) * 4;
-        require(name_at < data, "Image name out of bounds");
+        require(name_at >= strings && name_at < data, "Image name out of bounds");
         auto names = b.subspan(name_at, data - name_at);
         auto zero = std::find(names.begin(), names.end(), 0);
         require(zero != names.end(), "Unterminated image name");

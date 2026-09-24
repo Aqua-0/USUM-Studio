@@ -1,3 +1,4 @@
+#include "native/motion_graph.h"
 #include "native/tutorial_widgets.h"
 #include "native/skeletal_motion_editor.h"
 #include <imgui.h>
@@ -28,7 +29,13 @@ void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
         value_ = slope_ = 0;
         error_.clear();
     }
-    ImGui::TextWrapped("Use Studio Save edits, Undo/Redo and Write game files.");
+    ImGui::TextDisabled("Select a bone to pose or edit its keys.");
+    if (preview.looping_overlay >= 0) {
+        if (ImGui::Button("Disable overlay for posing")) {
+            preview.looping_effects = false;
+            preview.select_motion(preview.motion, repeat);
+        }
+    }
     studio::TutorialWidgets::Checkbox("skeletal_motion_editor", "Show bones through model",
                                       &show_bones);
     MaterialMotion clock;
@@ -87,6 +94,23 @@ void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                      : channel_ < 6 ? (track.axis_angle ? 0 : joint.rotation[channel_ - 3])
                                     : joint.translation[channel_ - 6];
     auto &curve = track.curves[channel_];
+    std::vector<MotionGraphKey> graph_keys;
+    for (auto &key : curve.keys)
+        graph_keys.push_back({key.frame, key.value});
+    auto graph = motion_graph(
+        "Bone motion timeline", motion.frames, float(frame), graph_keys,
+        [&](float at) {
+            return curve.sample(at, fallback);
+        },
+        graph_expanded_);
+    if (graph.frame >= 0)
+        scrub(graph.frame);
+    if (graph.key >= 0) {
+        const auto &key = curve.keys[graph.key];
+        key_frame_ = int(key.frame);
+        value_ = key.value;
+        slope_ = key.slope;
+    }
     ImGui::BeginChild("Bone keys", {0, 100}, ImGuiChildFlags_Borders);
     if (curve.keys.empty())
         ImGui::TextWrapped("No keys: uses the base pose or preceding layer.");
@@ -114,10 +138,6 @@ void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
     ImGui::InputFloat("Slope", &slope_, 0, 0, "%.5f");
     ImGui::TextWrapped(
         "Slope: change per frame. One key is constant; zero slope eases into a key.");
-    float points[128];
-    for (unsigned i = 0; i < 128; ++i)
-        points[i] = curve.sample(motion.frames * i / 127, fallback);
-    ImGui::PlotLines("##bone-curve", points, 128, 0, nullptr, FLT_MAX, FLT_MAX, {-1, 45});
     auto apply = [&](bool remove) {
         try {
             auto next = motion;
@@ -144,7 +164,7 @@ void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
     bool valid = key_frame_ >= 0 && key_frame_ <= motion.frames && std::isfinite(value_) &&
                  std::isfinite(slope_);
     ImGui::BeginDisabled(!valid);
-    if (studio::TutorialWidgets::Button("skeletal_motion_editor", "Set key")) {
+    if (studio::TutorialWidgets::Button("skeletal_motion_editor", "Insert key")) {
         auto &keys = track.curves[channel_].keys;
         std::erase_if(keys, [&](auto &k) {
             return k.frame == key_frame_;

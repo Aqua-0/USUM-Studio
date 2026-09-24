@@ -48,6 +48,8 @@ std::vector<std::string> decode_location_text(View b) {
                 c = 0x10000 + ((c - 0xd800) << 10) + (words[++j] - 0xdc00);
             } else
                 require(c < 0xdc00 || c > 0xdfff, "Invalid location text surrogate");
+            if (c == 0xe08e) c = 0x2642;
+            else if (c == 0xe08f) c = 0x2640;
             if (c < 32)
                 c = ' ';
             if (c < 128)
@@ -107,7 +109,7 @@ MapCatalog load_map_catalog(const std::filesystem::path &dump, const ArchiveSour
             name < names.size() && !names[name].empty() ? names[name] : "Unnamed map";
         std::set<int> mapped;
         for (auto p = begin; p < end; p += 4)
-            if (u16(h, p) == u16(z, 10)) {
+            if (u16(h, p) == zone) {
                 int area = u16(h, p + 2);
                 require(std::size_t(area) < count, "Map references a missing field area");
                 if (mapped.insert(area).second) {
@@ -121,4 +123,35 @@ MapCatalog load_map_catalog(const std::filesystem::path &dump, const ArchiveSour
             out.locations.push_back({-1, int(area), "Unassigned field area"});
     return out;
 }
+std::map<unsigned, int> load_area_zone_ids(const std::filesystem::path &dump, unsigned area) {
+    auto catalog = load_map_catalog(dump);
+    Archive zones(dump / TargetProfile::zone_archive), worlds(dump / TargetProfile::world_archive);
+    auto mapping = zones.decoded(1);
+    std::set<unsigned> selected_worlds;
+    for (auto &location : catalog.locations)
+        if (location.area == int(area) && location.zone >= 0)
+            selected_worlds.insert(u16(mapping, std::size_t(location.zone) * 2));
+    std::map<unsigned, int> result;
+    for (auto world : selected_worlds) {
+        auto pack = Container::parse(worlds.decoded(world), "WD");
+        auto &header = pack.files.at(0);
+        auto begin = u32(header, 8), end = u32(header, 12);
+        require(end >= begin && (end - begin) % 4 == 0, "Invalid world zone list");
+        slice(header, begin, end - begin);
+        unsigned previous_area = ~0u, local = 0;
+        for (auto at = begin; at < end; at += 4, ++local) {
+            auto member_area = u16(header, at + 2);
+            if (member_area != previous_area)
+                local = 0;
+            previous_area = member_area;
+            if (member_area != area)
+                continue;
+            auto zone = int(u16(header, at));
+            auto [it, added] = result.emplace(local, zone);
+            require(added || it->second == zone, "Conflicting area-local zone registrations");
+        }
+    }
+    return result;
+}
+
 }

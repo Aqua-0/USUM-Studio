@@ -6,18 +6,20 @@
 #include <cctype>
 namespace studio {
 void material_inspector(const Environment *scene, const EnvironmentRenderer &renderer,
-                        MaterialSelection &selection, const char *title) {
+                        MaterialSelection &selection, const char *title, bool embedded) {
     bool reveal = selection.focus;
-    if (selection.focus) {
+    if (selection.focus && !embedded) {
         if (!scene || selection.draw < 0 || scene->draws.at(selection.draw).placement < 0)
             ImGui::SetNextWindowFocus();
         selection.focus = false;
     }
-    ImGui::Begin(title);
+    if (!embedded)
+        ImGui::Begin(title);
     if (!scene) {
         ImGui::TextWrapped(
-            "Load a model or map, then Ctrl+click a surface to inspect its material.");
-        ImGui::End();
+            "Load a model or map, then click a surface to inspect its material.");
+        if (!embedded)
+            ImGui::End();
         return;
     }
     ImGui::SetNextItemWidth(-1);
@@ -31,10 +33,23 @@ void material_inspector(const Environment *scene, const EnvironmentRenderer &ren
     auto filter = lower(selection.filter);
     std::vector<int> matches;
     for (std::size_t i = 0; i < scene->materials.size(); ++i)
-        if (filter.empty() || lower(scene->materials[i].name).find(filter) != std::string::npos)
-            matches.push_back(int(i));
+        if (filter.empty() || lower(scene->materials[i].name).find(filter) != std::string::npos) {
+            bool belongs = !embedded || selection.draw < 0;
+            if (!belongs) {
+                const auto &selected = scene->draws.at(selection.draw);
+                for (const auto &draw : scene->draws)
+                    if (draw.material == i && draw.scope == selected.scope &&
+                        draw.placement == selected.placement && draw.source == selected.source)
+                        belongs = true;
+            }
+            if (belongs)
+                matches.push_back(int(i));
+        }
     ImGui::BeginChild("Material list",
-                      ImVec2(0, std::min(180.f, ImGui::GetContentRegionAvail().y * .35f)),
+                      ImVec2(0, std::min({180.f, ImGui::GetContentRegionAvail().y * .35f,
+                                          std::max(2.f, float(matches.size())) *
+                                                  ImGui::GetTextLineHeightWithSpacing() +
+                                              8.f})),
                       ImGuiChildFlags_Borders);
     ImGuiListClipper clipper;
     clipper.Begin(int(matches.size()));
@@ -49,7 +64,8 @@ void material_inspector(const Environment *scene, const EnvironmentRenderer &ren
             ImGui::PushID(i);
             if (ImGui::Selectable(scene->materials[i].name.c_str(), selection.material == i)) {
                 selection.material = i;
-                selection.draw = -1;
+                if (!embedded)
+                    selection.draw = -1;
             }
             if (reveal && selection.material == i)
                 ImGui::SetScrollHereY(.5f);
@@ -60,26 +76,30 @@ void material_inspector(const Environment *scene, const EnvironmentRenderer &ren
         }
     ImGui::EndChild();
     if (selection.material < 0 || std::size_t(selection.material) >= scene->materials.size()) {
-        ImGui::TextWrapped("Select a material above, or Ctrl+click a surface.");
-        ImGui::End();
+        ImGui::TextWrapped("Select a material above, or click a surface.");
+        if (!embedded)
+            ImGui::End();
         return;
     }
     auto &base = scene->materials[selection.material];
     auto &live = renderer.materials();
     auto &m = std::size_t(selection.material) < live.size() ? live[selection.material] : base;
     ImGui::TextWrapped("%s", m.name.c_str());
-    if (selection.draw >= 0 && std::size_t(selection.draw) < scene->draws.size())
+    if (!embedded && selection.draw >= 0 && std::size_t(selection.draw) < scene->draws.size())
         ImGui::TextWrapped("%s", scene->draws[selection.draw].name.c_str());
-    ImGui::TextDisabled("Material instance %d", selection.material);
-    if (studio::TutorialWidgets::Button("material_inspector", "Clear selection")) {
+    if (!embedded)
+        ImGui::TextDisabled("Material instance %d", selection.material);
+    if (!embedded && studio::TutorialWidgets::Button("material_inspector", "Clear selection")) {
         selection.material = selection.draw = -1;
-        ImGui::End();
+        if (!embedded)
+            ImGui::End();
         return;
     }
     if (selection.draw >= 0 && std::size_t(selection.draw) < scene->draws.size()) {
         auto &draw = scene->draws[selection.draw];
         if (studio::TutorialWidgets::CollapsingHeader("material_inspector", "Selected mesh",
-                                                      ImGuiTreeNodeFlags_DefaultOpen)) {
+                                                      embedded ? 0
+                                                               : ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Text("%zu vertices | %zu triangles", draw.vertices.size(),
                         draw.indices.size() / 3);
             auto visibility =
@@ -134,7 +154,7 @@ void material_inspector(const Environment *scene, const EnvironmentRenderer &ren
         }
     }
     if (studio::TutorialWidgets::CollapsingHeader("material_inspector", "Material coverage",
-                                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+                                                  embedded ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
         bool problem = false;
         if (!m.combiner.unsupported.empty()) {
             ImGui::TextWrapped("%s", m.combiner.unsupported.c_str());
@@ -164,7 +184,7 @@ void material_inspector(const Environment *scene, const EnvironmentRenderer &ren
                 ImGui::PopID();
             }
     if (studio::TutorialWidgets::CollapsingHeader("material_inspector", "Animation tracks",
-                                                  ImGuiTreeNodeFlags_DefaultOpen)) {
+                                                  embedded ? 0 : ImGuiTreeNodeFlags_DefaultOpen)) {
         bool any = false;
         for (auto &animation : scene->material_animations) {
             bool heading = false;
@@ -242,6 +262,7 @@ void material_inspector(const Environment *scene, const EnvironmentRenderer &ren
         if (m.unsupported_mapping)
             ImGui::TextWrapped("Unsupported texture mapping");
     }
-    ImGui::End();
+    if (!embedded)
+        ImGui::End();
 }
 }

@@ -327,6 +327,45 @@ void MeshSurface::build(const SkinnedModel &model, const std::vector<bool> &show
         }
     }
 }
+std::optional<MeshSurfacePixel> MeshSurface::pick_face(
+    const SkinnedModel &model, float x, float y, const std::set<std::size_t> &editable,
+    const std::vector<unsigned> &culls, bool through) const {
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x >= 1 || y >= 1)
+        return {};
+    std::optional<MeshSurfacePixel> hit;
+    for (std::size_t m = 0; m < model.meshes.size() && m < points.size(); ++m) {
+        if (through && !editable.contains(m)) continue;
+        const auto &mesh = model.meshes[m];
+        const auto &projected = points[m];
+        for (std::size_t f = 0; f < mesh.indices.size() / 3; ++f) {
+            const auto &a = projected.at(mesh.indices[f * 3]);
+            const auto &b = projected.at(mesh.indices[f * 3 + 1]);
+            const auto &c = projected.at(mesh.indices[f * 3 + 2]);
+            if (!a.inverse_w || !b.inverse_w || !c.inverse_w) continue;
+            double denominator = (double(b.y) - c.y) * (double(a.x) - c.x) +
+                                 (double(c.x) - b.x) * (double(a.y) - c.y);
+            if (!std::isfinite(denominator) || std::abs(denominator) < 1e-15 ||
+                (!through && m < culls.size() &&
+                 ((culls[m] == 1 && denominator < 0) || (culls[m] == 2 && denominator > 0))))
+                continue;
+            double u = ((double(b.y) - c.y) * (double(x) - c.x) +
+                        (double(c.x) - b.x) * (double(y) - c.y)) / denominator;
+            double v = ((double(c.y) - a.y) * (double(x) - c.x) +
+                        (double(a.x) - c.x) * (double(y) - c.y)) / denominator;
+            double t = 1 - u - v;
+            if (u < -1e-7 || v < -1e-7 || t < -1e-7) continue;
+            double depth = u * a.z + v * b.z + t * c.z;
+            double sum = u * a.inverse_w + v * b.inverse_w + t * c.inverse_w;
+            if (!std::isfinite(depth) || !std::isfinite(sum) || sum <= 0 ||
+                (hit && depth >= hit->depth)) continue;
+            hit = MeshSurfacePixel{float(depth), int(m), int(f),
+                                   {float(u * a.inverse_w / sum), float(v * b.inverse_w / sum),
+                                    float(t * c.inverse_w / sum)}, 0, 0};
+        }
+    }
+    if (hit && !editable.contains(std::size_t(hit->mesh))) return {};
+    return hit;
+}
 const MeshSurfacePixel *MeshSurface::at(float x, float y) const {
     if (x < 0 || y < 0 || x >= 1 || y >= 1 || !width || !height)
         return nullptr;

@@ -113,8 +113,9 @@ void PickupEditor::synchronize_visuals() {
         renderer_.invalidate_selection_readback();
     }
 }
-void PickupEditor::draw(bool loading) {
-    synchronize_visuals();
+void PickupEditor::draw(bool loading, bool show_launcher) {
+    if (!loading)
+        synchronize_visuals();
     int index = -1;
     auto selected = renderer_.spatial.selected;
     if (document_ && scene_ && selected >= 0 &&
@@ -129,14 +130,16 @@ void PickupEditor::draw(bool loading) {
                 }
             }
     }
-    ImGui::Begin("Map editing");
-    ImGui::BeginDisabled(index < 0 || loading);
-    if (studio::TutorialWidgets::Button("pickup_editor", "Edit selected pickup", ImVec2(-1, 0)))
-        open_ = true;
-    ImGui::EndDisabled();
-    if (!document_ && !message_.empty())
-        ImGui::TextWrapped("Pickup editing unavailable: %s", message_.c_str());
-    ImGui::End();
+    if (show_launcher) {
+        ImGui::Begin("Map inspector");
+        ImGui::BeginDisabled(index < 0 || loading);
+        if (studio::TutorialWidgets::Button("pickup_editor", "Edit selected pickup", ImVec2(-1, 0)))
+            open_ = true;
+        ImGui::EndDisabled();
+        if (!document_ && !message_.empty())
+            ImGui::TextWrapped("Pickup editing unavailable: %s", message_.c_str());
+        ImGui::End();
+    }
     if (!open_)
         return;
     ImGui::SetNextWindowSize({530, 550}, ImGuiCond_FirstUseEver);
@@ -146,8 +149,9 @@ void PickupEditor::draw(bool loading) {
         if (!project_store())
             ImGui::TextWrapped("Open an editor project to save and stage pickup edits.");
         if (index < 0)
-            ImGui::TextWrapped("Select an item pickup in Maps > Spatial. Use the Interactions "
-                               "preset to show pickups.");
+            ImGui::TextWrapped(
+                "Select an item pickup in Maps > Scene or Layers. Use the Interactions "
+                "preset to show pickups.");
         else {
             auto &r = document_->records()[index];
             auto v = document_->values(unsigned(index));

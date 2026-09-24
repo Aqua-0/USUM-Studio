@@ -4,9 +4,13 @@
 namespace studio {
 class MapCursor {
   public:
-    void draw(const Environment *scene, ViewportCamera &camera);
+    void draw(const Environment *scene, ViewportCamera &camera, bool show_launcher = true);
     bool viewport(const Environment &scene, EnvironmentRenderer &renderer, const float *view,
                   const float *projection, ImVec2 origin, ImVec2 size, bool hovered, bool cutaway);
+    void begin_placement() {
+        enabled_ = true;
+        placing_ = true;
+    }
     const SpatialPoint *position() const {
         return enabled_ ? &position_ : nullptr;
     }

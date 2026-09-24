@@ -1,3 +1,5 @@
+#include "native/canvas_navigation.h"
+#include "inspector_selector.h"
 #include "native/tutorial_widgets.h"
 #include "native/image_editor.h"
 #include "native/imgui_renderer.h"
@@ -178,8 +180,10 @@ void ImageEditor::refresh() {
                                                    : document_->current(selected_));
         if (channel_)
             for (std::size_t p = 0; p < image.rgba.size(); p += 4) {
-                if (channel_ == 2)
-                    image.rgba[p] = image.rgba[p + 1] = image.rgba[p + 2] = image.rgba[p + 3];
+                if (channel_ >= 2) {
+                    auto value = image.rgba[p + unsigned(channel_ - 2)];
+                    image.rgba[p] = image.rgba[p + 1] = image.rgba[p + 2] = value;
+                }
                 image.rgba[p + 3] = 255;
             }
         preview_ = upload(image);
@@ -400,7 +404,7 @@ void ImageEditor::draw(const std::filesystem::path &dump) {
     ImGui::Begin("Image library");
     ImGui::BeginDisabled(busy);
     if (studio::TutorialWidgets::Button("image_editor",
-                                        document_ ? "Rescan image library" : "Scan game images"))
+                                        document_ ? "Rescan image library" : "Load image library"))
         request_leave([this, dump] {
             scan(dump);
         });
@@ -413,7 +417,7 @@ void ImageEditor::draw(const std::filesystem::path &dump) {
         if (document_->catalog.dump != dump)
             ImGui::TextWrapped("Using the previously scanned dump. Rescan to switch sources.");
         ImGui::BeginDisabled(busy);
-        ImGui::SetNextItemWidth(-1);
+        InspectorSelectorStyle category_style("Choose image category");
         if (ImGui::BeginCombo("##image-category", category_.c_str())) {
             for (auto &c : categories_)
                 if (ImGui::Selectable(c.c_str(), c == category_)) {
@@ -422,6 +426,7 @@ void ImageEditor::draw(const std::filesystem::path &dump) {
                 }
             ImGui::EndCombo();
         }
+        category_style.end();
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputTextWithHint("##image-search", "Search image name or number", search_,
                                      sizeof(search_)))
@@ -490,25 +495,45 @@ void ImageEditor::draw(const std::filesystem::path &dump) {
         if (studio::TutorialWidgets::Checkbox("image_editor", "Original", &original_))
             refresh();
         ImGui::SameLine();
-        if (ImGui::Combo("Channels", &channel_, "RGBA\0RGB\0Alpha\0"))
+        ImGui::SetNextItemWidth(110);
+        if (ImGui::Combo("Channels", &channel_, "RGBA\0RGB\0Red\0Green\0Blue\0Alpha\0"))
             refresh();
         ImGui::SetNextItemWidth(180);
-        ImGui::SliderFloat("Zoom", &zoom_, .25f, 16, "%.2fx");
+        ImGui::SliderFloat("Zoom", &zoom_, .1f, 64, "%.2fx");
+        ImGui::SameLine();
+        if (ImGui::Button("Frame image (F)")) {
+            zoom_ = 1;
+            pan_ = {};
+        }
         ImGui::SameLine();
         studio::TutorialWidgets::Checkbox("image_editor", "Pixel grid", &grid_);
-        studio::TutorialWidgets::Checkbox("image_editor", "Checkerboard", &checker_);
-        if (!checker_) {
-            ImGui::SameLine();
-            ImGui::ColorEdit3("Background", background_, ImGuiColorEditFlags_NoInputs);
+        if (ImGui::Button("Display..."))
+            ImGui::OpenPopup("Image display");
+        if (ImGui::BeginPopup("Image display")) {
+            studio::TutorialWidgets::Checkbox("image_editor", "Checkerboard", &checker_);
+            if (!checker_) {
+                ImGui::SameLine();
+                ImGui::ColorEdit3("Background", background_, ImGuiColorEditFlags_NoInputs);
+            }
+            ImGui::EndPopup();
         }
         ImGui::EndDisabled();
-        ImGui::BeginChild("Pixel canvas", {0, 0}, ImGuiChildFlags_Borders,
-                          ImGuiWindowFlags_HorizontalScrollbar);
+        auto origin = ImGui::GetCursorScreenPos();
+        ImVec2 area{std::max(32.f, ImGui::GetContentRegionAvail().x),
+                    std::max(96.f, ImGui::GetContentRegionAvail().y)};
+        ImGui::InvisibleButton("##image-canvas", area,
+                               ImGuiButtonFlags_MouseButtonLeft |
+                                   ImGuiButtonFlags_MouseButtonMiddle);
+        navigate_canvas(origin, area, ImGui::IsItemHovered(), zoom_, pan_);
         auto &info = document_->catalog.images[selected_].info;
-        ImVec2 start = ImGui::GetCursorScreenPos(), size{info.width * zoom_, info.height * zoom_};
+        float pixel_scale = std::min(area.x / info.width, area.y / info.height) * zoom_;
+        ImVec2 size{info.width * pixel_scale, info.height * pixel_scale};
+        ImVec2 start{origin.x + (area.x - size.x) * .5f + pan_.x,
+                     origin.y + (area.y - size.y) * .5f + pan_.y};
         auto *draw = ImGui::GetWindowDrawList();
+        draw->PushClipRect(origin, {origin.x + area.x, origin.y + area.y}, true);
         if (checker_) {
-            auto clip_min = ImGui::GetWindowPos(), clip_size = ImGui::GetWindowSize();
+            auto clip_min = origin, clip_size = area;
             float x0 = std::max(0.f, std::floor((clip_min.x - start.x) / 16) * 16),
                   y0 = std::max(0.f, std::floor((clip_min.y - start.y) / 16) * 16);
             for (float y = y0; y < std::min(size.y, clip_min.y + clip_size.y - start.y); y += 16)
@@ -524,53 +549,22 @@ void ImageEditor::draw(const std::filesystem::path &dump) {
                                 ImGui::ColorConvertFloat4ToU32(
                                     {background_[0], background_[1], background_[2], 1}));
         if (bgfx::isValid(preview_))
-            ImGui::Image(ImTextureID(ImGuiRenderer::image_id(preview_)), size);
-        if (grid_ && zoom_ >= 4) {
+            draw->AddImage(ImTextureID(ImGuiRenderer::image_id(preview_)), start,
+                           {start.x + size.x, start.y + size.y});
+        if (grid_ && pixel_scale >= 4) {
             for (unsigned x = 0; x <= info.width; ++x)
-                draw->AddLine({start.x + x * zoom_, start.y},
-                              {start.x + x * zoom_, start.y + size.y}, IM_COL32(0, 0, 0, 80));
+                draw->AddLine({start.x + x * pixel_scale, start.y},
+                              {start.x + x * pixel_scale, start.y + size.y}, IM_COL32(0, 0, 0, 80));
             for (unsigned y = 0; y <= info.height; ++y)
-                draw->AddLine({start.x, start.y + y * zoom_},
-                              {start.x + size.x, start.y + y * zoom_}, IM_COL32(0, 0, 0, 80));
+                draw->AddLine({start.x, start.y + y * pixel_scale},
+                              {start.x + size.x, start.y + y * pixel_scale}, IM_COL32(0, 0, 0, 80));
         }
-        ImGui::EndChild();
+        draw->PopClipRect();
     } else
-        ImGui::TextWrapped("Scan the game images, then select an image to preview or replace.");
+        ImGui::TextWrapped("Load the image library to begin.");
     ImGui::End();
     ImGui::Begin("Image properties");
     ImGui::BeginDisabled(busy);
-    if (document_ && selected_ < document_->catalog.images.size()) {
-        auto &item = document_->catalog.images[selected_];
-        ImGui::TextWrapped("%s", item.name.c_str());
-        ImGui::Text("%u x %u | %s", item.info.width, item.info.height,
-                    native_image_format_name(item.info.format));
-        ImGui::TextWrapped("Replacement PNG must be exactly %u x %u pixels. Native colors and "
-                           "transparency are quantized during import.",
-                           item.info.width, item.info.height);
-        if (studio::TutorialWidgets::Button("image_editor", "Export PNG..."))
-            choose(Action::ExportPng);
-        if (studio::TutorialWidgets::Button("image_editor", "Replace PNG..."))
-            choose(Action::Import);
-        ImGui::BeginDisabled(imported_.empty());
-        if (studio::TutorialWidgets::Button("image_editor", "Reload last PNG"))
-            try {
-                import_file(imported_);
-            } catch (const std::exception &e) {
-                error_ = e.what();
-            }
-        ImGui::EndDisabled();
-        if (studio::TutorialWidgets::Button("image_editor", "Reset image")) {
-            document_->reset(selected_);
-            refresh();
-        }
-        if (studio::TutorialWidgets::TreeNode("image_editor", "Source")) {
-            ImGui::TextWrapped("%s\nMember %u / subfile %u", item.archive.c_str(), item.member,
-                               item.subfile);
-            ImGui::TextWrapped("Only this source image is replaced. Matching names in other "
-                               "packages remain separate.");
-            ImGui::TreePop();
-        }
-    }
     if (document_) {
         ImGui::Separator();
         if (studio::TutorialWidgets::Button("image_editor", "Undo")) {
@@ -604,6 +598,41 @@ void ImageEditor::draw(const std::filesystem::path &dump) {
                                "textures stay in Studio. Unsupported sources are skipped.");
             for (auto &d : document_->catalog.diagnostics)
                 ImGui::TextWrapped("%s", d.c_str());
+            ImGui::TreePop();
+        }
+    }
+    ImGui::Separator();
+    if (document_ && selected_ < document_->catalog.images.size()) {
+        auto &item = document_->catalog.images[selected_];
+        ImGui::TextWrapped("%s", item.name.c_str());
+        ImGui::Text("%u x %u | %s", item.info.width, item.info.height,
+                    native_image_format_name(item.info.format));
+        ImGui::SeparatorText("Edit image");
+        if (studio::TutorialWidgets::Button("image_editor", "Export PNG..."))
+            choose(Action::ExportPng);
+        if (studio::TutorialWidgets::Button("image_editor", "Replace PNG...", {-1, 0}))
+            choose(Action::Import);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Use a %u x %u PNG. Colors and alpha are converted to the native format.",
+                item.info.width, item.info.height);
+        ImGui::BeginDisabled(imported_.empty());
+        if (studio::TutorialWidgets::Button("image_editor", "Reload last PNG"))
+            try {
+                import_file(imported_);
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+        ImGui::EndDisabled();
+        if (studio::TutorialWidgets::Button("image_editor", "Reset image")) {
+            document_->reset(selected_);
+            refresh();
+        }
+        if (studio::TutorialWidgets::TreeNode("image_editor", "Source")) {
+            ImGui::TextWrapped("%s\nMember %u / subfile %u", item.archive.c_str(), item.member,
+                               item.subfile);
+            ImGui::TextWrapped("Only this source image is replaced. Matching names in other "
+                               "packages remain separate.");
             ImGui::TreePop();
         }
     }

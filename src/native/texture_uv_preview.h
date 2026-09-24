@@ -2,7 +2,18 @@
 #include "scene/environment.h"
 #include "scene/texture_uv.h"
 #include <imgui.h>
+#include <algorithm>
 namespace studio {
+inline void draw_texture_checkerboard(ImVec2 origin, ImVec2 size) {
+    auto *draw = ImGui::GetWindowDrawList();
+    for (float y = 0; y < size.y; y += 12)
+        for (float x = 0; x < size.x; x += 12) {
+            int shade = (int(x / 12) + int(y / 12)) % 2 ? 65 : 95;
+            draw->AddRectFilled({origin.x + x, origin.y + y},
+                {origin.x + std::min(x + 12, size.x), origin.y + std::min(y + 12, size.y)},
+                IM_COL32(shade, shade, shade, 255));
+        }
+}
 inline void draw_texture_uvs(const Environment &scene, std::size_t material,
                              const SceneTexture &input, bool transformed, ImVec2 origin,
                              float size) {

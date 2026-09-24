@@ -2,8 +2,206 @@
 namespace studio {
 const std::vector<TutorialTopic> &tutorial_topics() {
     static const std::vector<TutorialTopic> topics{
+        {"control/Scale (S)", "Scale selection",
+         "Choose scaling for the current edit selection. Check the pivot and selected elements "
+         "before applying."},
+        {"uv_editor/Move (G)", "Move UVs",
+         "Translate selected UV points or islands in the texture view. Apply the transform to "
+         "store the edited coordinates."},
+        {"uv_editor/Rotate (R)", "Rotate UVs",
+         "Rotate the selected UV points or islands around their pivot. This changes texture "
+         "placement, not model geometry."},
+        {"uv_editor/Scale (S)", "Scale UVs",
+         "Resize the selected UV points or islands around their pivot. This changes texture "
+         "coverage, not the texture image."},
+        {"project_workspace/External editing (pk3DS)...", "External editing",
+         "Connect a separate dump for another editor, review its changes, and exchange staged "
+         "resources. Keep the original project dump unchanged."},
+        {"main/3DS preview", "3DS preview",
+         "Render at 400 by 240 pixels to check the handheld-sized result. This only changes the "
+         "preview."},
+        {"main/Keep 400 x 240 size", "Native preview size",
+         "Keep the low-resolution preview at its native size instead of enlarging it to fill the "
+         "viewport."},
+        {"geometry_editor/All visible meshes", "Triangle overlay scope",
+         "Draw triangle overlays for all visible meshes. This changes the overlay scope, not mesh "
+         "visibility or saved geometry."},
+        {"map_authoring_workspace/Blender asset exchange", "Blender asset exchange",
+         "Export an asset package for the Blender add-on, then import the edited package. Game "
+         "material settings remain managed in Studio."},
+        {"map_authoring_workspace/Edit in Studio", "Edit asset in Studio",
+         "Open the selected project asset in Studio to edit its materials and model. Save and "
+         "return to Authoring to update the asset."},
+        {"map_authoring_workspace/Export asset for Blender...", "Export for Blender",
+         "Write the current object as an asset package, including textures, for editing with the "
+         "USUMStudio Blender add-on."},
+        {"map_authoring_workspace/Export asset...", "Share an asset",
+         "Export the selected asset package with its model and textures so another project can "
+         "import it."},
+        {"map_authoring_workspace/Import asset...", "Import an asset",
+         "Add an exported asset package to the library. Place the imported asset in a composition "
+         "to use it in a map."},
+        {"map_authoring_workspace/Import edited asset...", "Import Blender edits",
+         "Read the edited asset package for the current object. Review the geometry before saving "
+         "it to the library."},
+        {"map_authoring_workspace/Import new Blender model...", "Import a new model",
+         "Read a new model exported with the USUMStudio Blender add-on. Review its geometry and "
+         "material assignments before saving it as an asset."},
+        {"map_authoring_workspace/Load selected map", "Load source map",
+         "Load the selected source map so its surfaces and objects are available for authoring."},
+        {"material_editor/Save and return to Authoring", "Save asset changes",
+         "Save this Studio edit back to the project asset and return to Authoring. Placements "
+         "sharing the asset use the updated model."},
+        {"spatial_overlay/##Lock", "Lock region selection",
+         "Prevent this region category from being selected in the viewport. This does not change "
+         "game data."},
+        {"spatial_overlay/Select visible regions in viewport", "Pick region overlays",
+         "Allow visible, unlocked region overlays to be selected in the map viewport."},
+        {"uv_editor/Frame UVs (F)", "Frame UVs",
+         "Fit the view to the displayed UVs. This changes the view, not "
+         "the coordinates."},
+        {"project_workspace/Connect existing dump", "Connect existing dump",
+         "Connect a separate working dump without writing to it. The first scan includes "
+         "differences already present compared with the original dump."},
+        {"project_workspace/Create full working copy", "Create full working copy",
+         "Create a complete separate dump and apply staged project changes. Allow roughly 4 GB and "
+         "choose a new or empty folder."},
+        {"project_workspace/Create copy and connect", "Create copy and connect",
+         "Copy the original dump into the chosen separate folder, apply staged changes and scan it "
+         "for review."},
+        {"project_workspace/Connect and review", "Connect and review",
+         "Connect the chosen separate dump and compare its content. Save, stage and reload Studio "
+         "changes first."},
+        {"project_workspace/Scan connected dump", "Scan connected dump",
+         "Compare file contents and archive members with the last reviewed versions. Close the "
+         "external editor window first so it finishes saving."},
+        {"project_workspace/Open external folder", "Open external folder",
+         "Open the connected working dump in the file browser."},
+        {"project_workspace/pk3DS is closed", "pk3DS is closed",
+         "Confirm pk3DS has fully closed before sending changes, so its cached files cannot "
+         "overwrite the new versions."},
+        {"project_workspace/Send staged changes to external dump",
+         "Send staged changes to external dump",
+         "Update changed files in the separate dump using staged Studio data. Review external "
+         "edits first; the original dump is never the destination."},
+        {"project_workspace/Import non-conflicting", "Import non-conflicting",
+         "Choose Import for changes without a conflict. Nothing is imported until you apply the "
+         "choices."},
+        {"project_workspace/Keep project for all", "Keep project for all",
+         "Keep project versions and acknowledge the external versions. This does not copy external "
+         "changes into the project."},
+        {"project_workspace/Apply choices and reload Studio", "Apply choices and reload Studio",
+         "Import selected changes into the project, acknowledge Keep project choices and reload. "
+         "Decide later keeps an edit pending; resolve conflicts before applying."},
+        {"project_workspace/External change choice", "External change choice",
+         "Import takes the external version; Keep project acknowledges it without applying it; "
+         "Decide later leaves it pending. Matching trainer record and team choices stay paired."},
+        {"project_workspace/Trust current original dump and upgrade legacy verification",
+         "Trust current original dump and upgrade legacy verification",
+         "For older projects only: trust the current original dump contents as the hash baseline. "
+         "Use this only after confirming the dump is intact; this cannot detect edits made before "
+         "the baseline."},
+        {"project_workspace/Automatically reload after staging",
+         "Automatically reload after staging",
+         "Reload updated assets after successful manual or automatic staging. This editor "
+         "preference applies to all projects and defaults off. New edits made during staging "
+         "postpone the reload until they are staged."},
+        {"conversation_editor/Create override", "Create override",
+         "Start an editable replacement for this interaction. Previewing the template alone does "
+         "not change the project."},
+        {"conversation_editor/Discard draft", "Discard draft",
+         "Restore this interaction to when it was opened, including changes saved since then. "
+         "Other interactions are preserved."},
+        {"conversation_editor/Remove override", "Remove override",
+         "Remove only this interaction's authored override. Save and stage to restore its baseline "
+         "behavior."},
+        {"conversation_editor/Compiler settings", "Compiler settings",
+         "Choose the compatible version-10 Pawn compiler and bundled support includes used to "
+         "compile authored interactions."},
+        {"conversation_editor/Save compiler settings", "Save compiler settings",
+         "Remember the compiler executable and support include folder in application preferences."},
+        {"conversation_editor/Compile conversations", "Compile conversations",
+         "Ctrl+Shift+C compiles conversations throughout the project from any workspace. Save and "
+         "stage after compilation succeeds."},
+        {"trainer_patrol/Trainer patrol", "Trainer patrol",
+         "Edit the selected trainer's route and movement settings. Apply changes, then save and "
+         "stage the project."},
+        {"trainer_patrol/Add patrol route", "Add patrol route",
+         "Start a two-point route for this trainer. Move or insert points before applying it."},
+        {"trainer_patrol/Delete patrol route", "Delete patrol route",
+         "Remove the route and its patrol actions. Choose an idle motion in Movement and patrol "
+         "actions."},
+        {"trainer_patrol/Insert point", "Insert point",
+         "Insert a point after the selected point. Interior points start halfway to the next "
+         "point."},
+        {"trainer_patrol/Remove point", "Remove point",
+         "Remove the selected route point. A route needs at least two points."},
+        {"trainer_patrol/Place point at 3D cursor", "Place point at 3D cursor",
+         "Move the selected route point to the map cursor. Stored offsets follow the trainer "
+         "placement."},
+        {"trainer_patrol/Edit route in viewport", "Edit route in viewport",
+         "Click a route point and drag its X, Y or Z handle. Ctrl snaps; Escape cancels the drag."},
+        {"trainer_patrol/Undo patrol", "Undo patrol",
+         "Undo a change to this patrol draft. Applied changes use the placement editor's Undo."},
+        {"trainer_patrol/Redo patrol", "Redo patrol",
+         "Restore an undone change to this patrol draft."},
+        {"conversation_editor/Compile all conversations", "Compile all conversations",
+         "Compile and check authored interactions across every saved area in the project. After "
+         "successful "
+         "compilation, save and stage the project to apply the scripts."},
+        {"conversation_editor/Preview visual flow", "Preview visual flow",
+         "Walk through the visual branches and message choices. This is a flow preview, not game "
+         "execution; it does not simulate all runtime state."},
+        {"conversation_editor/Visual editor", "Visual editor",
+         "Edit the interaction as steps and branches. Select a step to change its arguments."},
+        {"conversation_editor/Pawn source", "Pawn source",
+         "Inspect generated Pawn or edit custom source. Custom source needs compilation and is not "
+         "automatically converted back into visual steps."},
+        {"conversation_editor/Add step...", "Add step...",
+         "Choose an action to insert into the selected branch. Inspect its arguments and branch "
+         "outcomes before compiling."},
+        {"conversation_editor/Restore generated source...", "Restore generated source...",
+         "Replace custom Pawn with source generated from the visual steps after confirmation. "
+         "Custom source changes will be discarded."},
+        {"conversation_editor/Delete step", "Delete step",
+         "Remove the selected step and any branches it owns. Undo restores the edit."},
+        {"conversation_editor/Move up", "Move up",
+         "Move this step earlier within its current branch."},
+        {"conversation_editor/Move down", "Move down",
+         "Move this step later within its current branch."},
+        {"audio_editor/Import WAV...", "Import WAV",
+         "Import a WAV for the selected sound sample. Mono and stereo are retained during "
+         "import; applying checks the destination format and channel constraints."},
+        {"cry_editor/Import WAV...", "Import WAV",
+         "Import a WAV for this cry. Preparing the replacement mixes stereo to mono and resamples "
+         "to the cry format; preview the result before applying."},
+
+        {"battle_effect_browser/Refresh effects", "Refresh battle effects",
+         "Read effect resources from the current project, including staged changes and every "
+         "populated subfile."},
+        {"battle_effect_browser/Search effects", "Find an effect resource",
+         "Search stored resource names or entry:subfile identifiers. Click a result to preview or "
+         "inspect it. These identifiers locate files; they are not move names."},
+        {"battle_effect_browser/Resource type", "Filter effect resources",
+         "Show models, textures, motions, particles, shaders or camera environments. Model packs "
+         "include their nested resources."},
+        {"battle_effect_browser/Attach motion to preview model", "Pair an effect motion",
+         "Open a model, then select a separate motion. Pairing makes its supported tracks "
+         "available for preview and Studio editing; it does not change game sequence references. "
+         "Bone, material and mesh names must match. Shared motion edits affect every effect using "
+         "that resource."},
+        {"battle_effect_browser/Use as camera environment", "Choose camera defaults",
+         "Remember this environment, then select a matching camera motion. Environments with "
+         "unsupported camera layouts remain inspection-only."},
+        {"battle_effect_browser/Pair with selected camera environment", "Preview an effect camera",
+         "Combine a camera motion with the remembered environment. Camera names must match. Scrub "
+         "Camera frame to view it against the open model."},
+        {"battle_effect_browser/Preview camera in viewport", "Use the effect camera",
+         "Show the loaded model through the paired effect camera. Turn this off to orbit freely. "
+         "This preview does not edit the camera or play effect sequences."},
         {"main/Workspace", "Workspace",
-         "Choose Maps, Models, Studio, Authoring, Collision, Cameras, Images or Audio. Narrow "
+         "Choose Maps, Models, Studio, Authoring, Collision, Cameras, Images, Audio or Warp Ride. "
+         "Narrow "
          "windows use this dropdown so Project and Help remain accessible. Each workspace "
          "introduces its controls when you first explore it."},
         {"collision_editor/##visible", "Collision category visibility",
@@ -80,9 +278,6 @@ const std::vector<TutorialTopic> &tutorial_topics() {
         {"control/Apply UV transform", "Apply UV transform",
          "Apply the entered transform to selected UV coordinates. Check seams and the texture "
          "preview before saving."},
-        {"control/Apply and reload map", "Apply and reload map",
-         "Save and stage the reviewed overworld placement edits, then reopen the map using staged "
-         "assets. Build game export separately when you want an export folder."},
         {"control/Apply attribute", "Apply attribute",
          "Assign the selected collision attribute to the selected triangles. Attributes affect "
          "movement behavior, not just preview colors."},
@@ -104,8 +299,8 @@ const std::vector<TutorialTopic> &tutorial_topics() {
          "Apply the reviewed simplification to the selected authored terrain. Check silhouette and "
          "surface detail before saving."},
         {"control/Apply texture", "Apply texture",
-         "Encode the imported PNG in the chosen output format and add or replace the texture. "
-         "Replacing a texture keeps its stored mip-level count and, by default, its format."},
+         "Apply the selected texture assignment to the current texture unit. Check the preview and "
+         "save the document to keep the edit."},
         {"control/Apply texture size", "Apply texture size",
          "Apply the configured texture scale to the selected authored surface so tiling matches "
          "the intended world size."},
@@ -523,11 +718,11 @@ const std::vector<TutorialTopic> &tutorial_topics() {
         {"control/Far side", "Far side",
          "Preview the Pokemon on the opposite battle side to inspect framing and orientation."},
         {"control/Feeding", "Feeding",
-         "Preview feeding interactions and edit supported saved feeding parameters. Feeding-area "
-         "bounds affect only the preview; the game's feeding rectangle is fixed."},
+         "Preview and edit supported Pokemon feeding-area parameters. Test the resulting reach and "
+         "placement in the preview."},
         {"control/Feeding area bounds", "Feeding area bounds",
-         "Adjust the feeding rectangle in the preview. These bounds are not saved to game assets "
-         "or included in exports."},
+         "Inspect/edit the supported feeding-area bounds and compare them with the model in "
+         "preview."},
         {"control/Feeding camera (saved)", "Feeding camera (saved)",
          "Edit the supported saved feeding-camera parameters. These are different from simply "
          "moving the preview camera."},
@@ -826,13 +1021,25 @@ const std::vector<TutorialTopic> &tutorial_topics() {
         {"control/Move", "Move",
          "Choose translation handles for the current edit selection. Drag a handle or enter "
          "coordinates in the panel; movement edits the selected data."},
+        {"bone_gizmo/Move (G)", "Move (G)",
+         "Drag a bone arrow, or press G in the viewport and move the mouse. X/Y/Z constrains the "
+         "parent-space axis. Click or Enter confirms a key at the current frame; Escape cancels."},
+        {"bone_gizmo/Rotate (R)", "Rotate (R)",
+         "Drag a bone ring, or press R in the viewport. X/Y/Z chooses a parent-space axis. "
+         "Click or Enter confirms; Escape cancels."},
+        {"bone_gizmo/Scale (S)", "Scale (S)",
+         "Drag a scale box, or press S to scale the selected bone uniformly. X/Y/Z constrains "
+         "the axis. Confirm to key this frame, or Escape to cancel."},
+        {"control/Pose", "Pose mode",
+         "Pause animation and disable the looping overlay to pose bones. Select a bone in the "
+         "viewport, then use G/R/S or its handles. Confirmed transforms key the current frame."},
         {"control/Move (W)", "Move (W)",
          "Choose translation handles for the current edit selection. Drag a handle or enter "
          "coordinates in the panel; movement edits the selected data."},
         {"control/Move by X / Y / Z", "Move by X / Y / Z",
          "Move selected terrain vertices/cells by the entered offsets. Review the selection and "
          "axis directions first."},
-        {"control/Move handles", "Move handles",
+        {"control/Move (G)", "Move (G)",
          "Choose translation handles for the current edit selection. Drag a handle or enter "
          "coordinates in the panel; movement edits the selected data."},
         {"control/Move selection", "Move selection",
@@ -1050,15 +1257,12 @@ const std::vector<TutorialTopic> &tutorial_topics() {
         {"control/Proportional editing", "Proportional editing",
          "Extend a geometry transform to nearby vertices using the configured radius/falloff. "
          "Check the affected area before applying."},
-        {"control/Queue addition", "Queue addition",
-         "Queue the reviewed overworld placement change. Use Apply and reload map to apply queued "
-         "edits, then save/stage them through the project workflow."},
-        {"control/Queue deletion", "Queue deletion",
-         "Queue the reviewed overworld placement change. Use Apply and reload map to apply queued "
-         "edits, then save/stage them through the project workflow."},
-        {"control/Queue update", "Queue update",
-         "Queue the reviewed overworld placement change. Use Apply and reload map to apply queued "
-         "edits, then save/stage them through the project workflow."},
+        {"control/Apply addition", "Apply addition",
+         "Apply the draft to the working map. Save Project keeps it; Stage builds game resources."},
+        {"control/Apply deletion", "Apply deletion",
+         "Apply the draft to the working map. Save Project keeps it; Stage builds game resources."},
+        {"control/Apply changes", "Apply changes",
+         "Apply the draft to the working map. Save Project keeps it; Stage builds game resources."},
         {"control/Raise", "Raise",
          "Change the selected surface's height by the entered value or increment. Check adjacent "
          "boundaries and player collision after editing."},
@@ -1121,8 +1325,8 @@ const std::vector<TutorialTopic> &tutorial_topics() {
          "Read the previously selected replacement PNG again after external edits. Review the new "
          "image before saving."},
         {"control/Reload staged assets", "Reload staged assets",
-         "Save open project documents and reopen the editor using already staged assets. This "
-         "does not compile new edits; use Stage and reload to include them in the source preview."},
+         "Reopen the editor using staged assets. Stage and reload saves and stages first; Reload "
+         "staged assets uses the already staged source."},
         {"control/Remove bone track", "Remove bone track",
          "Remove this bone's animation track from the selected motion. Other bone tracks remain."},
         {"control/Remove collision", "Remove collision",
@@ -1169,11 +1373,11 @@ const std::vector<TutorialTopic> &tutorial_topics() {
          "Reset this editor's changes to the loaded source values. Review the result before "
          "saving."},
         {"control/Reset feeding parameters", "Reset feeding parameters",
-         "Reset the preview rectangle to the game's fixed feeding-area bounds. Saved feeding "
-         "parameters and game assets are unchanged."},
+         "Restore the feeding parameters or area to the source settings. Check the affected fields "
+         "before saving."},
         {"control/Reset game feeding area", "Reset game feeding area",
-         "Reset the preview rectangle to the game's fixed feeding-area bounds. Saved feeding "
-         "parameters and game assets are unchanged."},
+         "Restore the feeding parameters or area to the source settings. Check the affected fields "
+         "before saving."},
         {"control/Reset grid controls", "Reset grid controls",
          "Return the grid input controls to their default values without applying a new grid."},
         {"control/Reset image", "Reset image",
@@ -1368,7 +1572,7 @@ const std::vector<TutorialTopic> &tutorial_topics() {
         {"control/Send to Studio", "Send to Studio",
          "Open the loaded model in Studio for material, texture, geometry, skeleton and motion "
          "editing. Changes affect the source resource and its shared uses."},
-        {"control/Set key", "Set key",
+        {"control/Insert key", "Insert key",
          "Write a key at the selected frame using the current channel values. Check the selected "
          "motion, track and channel before saving."},
         {"control/Set new start here", "Set new start here",
@@ -1487,8 +1691,8 @@ const std::vector<TutorialTopic> &tutorial_topics() {
          "Save editor documents and compile them into the project's staged assets. Staging alone "
          "does not necessarily reload the open map or build the export folder."},
         {"control/Stage and reload", "Stage and reload",
-         "Save open project documents, compile their changes, then reopen the editor using the "
-         "updated staged assets. Build game export is a separate action."},
+         "Reopen the editor using staged assets. Stage and reload saves and stages first; Reload "
+         "staged assets uses the already staged source."},
         {"control/Stage and return to map", "Stage and return to map",
          "Save and stage this model's project edits, then return to the map source preview. Shared "
          "model changes can affect other placements."},
@@ -1502,7 +1706,8 @@ const std::vector<TutorialTopic> &tutorial_topics() {
          "Start player preview at the camera's current target. This is useful for checking scale "
          "and collision; it does not create an entrance or edit the map spawn."},
         {"control/Start from selected map", "Start from selected map",
-         "Open the selected map's saved composition, or create one from the current project source. "
+         "Open the selected map's saved composition, or create one from the current project "
+         "source. "
          "Saved compositions retain their source baseline. Review what the composition replaces."},
         {"control/Start player mode", "Start player mode",
          "Switch between walking preview and the free viewing camera. Player preview checks "
@@ -1568,7 +1773,7 @@ const std::vector<TutorialTopic> &tutorial_topics() {
         {"control/Trigger dimensions and endpoints", "Trigger dimensions and endpoints",
          "Edit entrance trigger bounds and relevant endpoint/arrival fields. Check both the "
          "visible trigger and destination in the map."},
-        {"control/Turn ring", "Turn ring",
+        {"control/Rotate (R)", "Rotate (R)",
          "Choose rotation handles for the current edit selection. Check the axis and pivot before "
          "rotating."},
         {"control/Undo", "Undo",
@@ -1599,7 +1804,7 @@ const std::vector<TutorialTopic> &tutorial_topics() {
          "to control the transition."},
         {"control/Use current frame", "Use current frame",
          "Copy the playback position into the key-frame field. This does not create a key until "
-         "you use Set key."},
+         "you use Insert key."},
         {"control/Use distance / scale overrides", "Use distance / scale overrides",
          "Use the configured overrides in the feeding preview. Compare them with source values "
          "before saving supported parameter edits."},
@@ -1696,16 +1901,18 @@ const std::vector<TutorialTopic> &tutorial_topics() {
          "or open an existing editor project. Project files hold your edits; staged assets are "
          "compiled from them. The walkthrough resumes after project opening restarts the editor."},
         {"workspace/0", "Maps walkthrough",
-         "Load a map, navigate from its start and Ctrl+click a surface to inspect it. Area "
-         "contains Map, Preview and View tabs; Scene lists objects; Spatial exposes interaction "
-         "layers. Follow the highlighted controls or open another panel to learn it in context."},
+         "Choose a map in the browser, then click an object or surface to inspect it. Scene lists "
+         "objects and interactions; Layers controls region overlays. Edit uses the selection "
+         "inspector, Preview opens player controls, and the time button opens environment and "
+         "music."},
         {"workspace/1", "Models walkthrough",
-         "Choose a Pokemon, character or clothing resource from your project. Load it to inspect "
-         "its parts and animation, then send it to Studio for edits. A model resource can be "
-         "shared by several game placements."},
+         "Select a Pokemon or other resource in the left browser. Use the inspector menu for "
+         "meshes, materials, bones, settings and source details. Animation and Display control "
+         "the preview; Send to Studio opens the model for editing."},
         {"workspace/2", "Studio walkthrough",
-         "Start by sending a model here from Maps or Models. Choose a material on the left; use "
-         "the detail tabs for geometry, skeleton, motions and Blender exchange. Edits affect the "
+         "Send a model here from Maps or Models. Choose a material and editing page on the left; "
+         "use the inspector menu for geometry, UVs, skeleton, motions and Blender exchange. Edits "
+         "affect the "
          "loaded resource, including other placements that share it. Save, stage and reload to "
          "inspect compiled results."},
         {"workspace/3", "Authoring walkthrough",
@@ -1725,6 +1932,13 @@ const std::vector<TutorialTopic> &tutorial_topics() {
          "Select an image resource, compare the original and edited versions, and export or "
          "replace PNGs. Check transparency, dimensions and stored texture format before saving. "
          "Save and stage changes before building game files."},
+        {"workspace/8", "Warp Ride walkthrough",
+         "Choose an asset to inspect its loop animation, or choose Simulator. Set a seed and "
+         "restart, then run and click the viewport to steer. Space pauses; Step frame advances "
+         "one tick. Choose a mount, curved routes or game distance bands to explore the preview. "
+         "These settings do not change game files."},
+        {"main/Warp Ride", "Warp Ride",
+         "Preview course assets and test a seeded ride with energy, obstacles and wormholes."},
         {"workspace/7", "Audio walkthrough",
          "Choose music, a sound or Pokemon cry and listen to the original first. Import a "
          "replacement, inspect its conversion and preview it before applying. Save editable "

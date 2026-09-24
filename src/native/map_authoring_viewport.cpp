@@ -1,3 +1,4 @@
+#include "native/viewport_navigation.h"
 #include "native/tutorial_widgets.h"
 #include "native/map_authoring_workspace.h"
 #include "native/imgui_renderer.h"
@@ -521,7 +522,7 @@ bool MapAuthoringWorkspace::terrain_handles(
     if (ground_handle_ >= 11 && ground_handle_ <= 13) {
         float value = (io.MousePos.x - ground_drag_start_.x) * ground_drag_axis_.x +
                       (io.MousePos.y - ground_drag_start_.y) * ground_drag_axis_.y;
-        if ((terrain_snap_ || io.KeyShift) && std::isfinite(ground_step_) && ground_step_ > 0)
+        if ((terrain_snap_ || io.KeyCtrl) && std::isfinite(ground_step_) && ground_step_ > 0)
             value = std::round(value / ground_step_) * ground_step_;
         SpatialPoint delta{};
         delta[ground_handle_ - 11] = value;
@@ -667,9 +668,9 @@ bool MapAuthoringWorkspace::ground_handles(
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         ImGui::SetTooltip(hot == 1 || hot == 4
                               ? "Drag: raise / lower | Scroll while held: neighbor influence | "
-                                "Click: height step | Shift: snap"
-                          : hot == 2 ? "Drag: tilt around X | Shift: snap"
-                                     : "Drag: tilt around Z | Shift: snap");
+                                "Click: height step | Ctrl: snap"
+                          : hot == 2 ? "Drag: tilt around X | Ctrl: snap"
+                                     : "Drag: tilt around Z | Ctrl: snap");
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             ground_handle_ = hot;
             ground_drag_start_ = io.MousePos;
@@ -687,7 +688,7 @@ bool MapAuthoringWorkspace::ground_handles(
                       (io.MousePos.y - ground_drag_start_.y) * ground_drag_axis_.y;
         if (!height)
             value = std::clamp(value, -75.f, 75.f);
-        if (io.KeyShift) {
+        if (io.KeyCtrl) {
             const float step = height ? ground_step_ : ground_tilt_step_;
             if (std::isfinite(step) && step > 0)
                 value = std::round(value / step) * step;
@@ -787,8 +788,13 @@ void MapAuthoringWorkspace::asset_editor_viewport(std::uint32_t) {
     ImGui::SameLine();
     studio::TutorialWidgets::RadioButton("map_authoring_viewport", "Connected",
                                          &asset_selection_mode_, 2);
-    ImGui::TextWrapped("Click: select | Ctrl: add / toggle | Box: select through | Shift + drag: "
-                       "orbit | Right drag: pan | Wheel: zoom");
+    if (ImGui::Button("Controls"))
+        ImGui::OpenPopup("Authoring controls");
+    if (ImGui::BeginPopup("Authoring controls")) {
+        ImGui::TextWrapped("Click: select | Ctrl: add / toggle | Box: select through");
+        ImGui::TextWrapped("%s", viewport_navigation_help);
+        ImGui::EndPopup();
+    }
     auto size = ImGui::GetContentRegionAvail();
     size.x = std::max(size.x, 1.f);
     size.y = std::max(size.y, 1.f);
@@ -835,12 +841,7 @@ void MapAuthoringWorkspace::asset_editor_viewport(std::uint32_t) {
     if (!focused || ImGui::IsKeyPressed(ImGuiKey_Escape))
         asset_box_drag_ = false;
     if (hovered && focused && !io.WantTextInput) {
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
-            (io.KeyShift && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))
-            camera.rotate(io.MouseDelta.x, io.MouseDelta.y, false);
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
-            camera.pan(io.MouseDelta.x, io.MouseDelta.y);
-        camera.wheel(io.MouseWheel, false);
+        viewport_navigation(camera, window_, true);
         if (asset_selection_mode_ == 1 && !io.KeyShift &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             asset_box_drag_ = true;
@@ -968,6 +969,7 @@ void MapAuthoringWorkspace::asset_editor_viewport(std::uint32_t) {
 }
 void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
     ImGui::Begin("Authoring viewport");
+    if (object_drag_resource_ && document_ && inspect_) { inspect_=false; renderer_.set_scene(composed_); }
     if (!document_) {
         ImGui::TextWrapped("Start from the selected map or open a composition.");
         ImGui::End();
@@ -983,7 +985,6 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
                 select_instance(shown_[i].id);
         }
     }
-    stage_toolbar();
     ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
     if (studio::TutorialWidgets::RadioButton("map_authoring_viewport", "Map", !inspect_) &&
         inspect_) {
@@ -1063,7 +1064,7 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
         }
     }
     if (!inspect_) {
-        studio::TutorialWidgets::Checkbox("map_authoring_viewport", "Grid guide", &show_grid_);
+        if (!existing_mode_) studio::TutorialWidgets::Checkbox("map_authoring_viewport", "Grid guide", &show_grid_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(document_->ground()
                                   ? "Shows cell edges across the entire authored terrain, "
@@ -1078,21 +1079,24 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
             ImGui::DragFloat("Height", &cut_height_, 5);
         }
     }
-    ImGui::TextWrapped(
-        ground_mode_ && document_->ground() &&
-                (ground_transform_tool_ == Mesh ||
-                 (ground_transform_tool_ == Vertices && !document_->ground()->triangles.empty()))
-            ? "Click: select | Drag: box select | Ctrl: add/toggle | Arrows: move | Shift-drag: "
-              "orbit | Right-drag: pan"
-        : ground_mode_ && document_->ground() && ground_transform_tool_ >= Sculpt &&
-                ground_transform_tool_ <= BlendBrush && stage_ != AuthoringStage::Review
-            ? "Drag: brush | Alt: reverse height | Escape: cancel | Shift + drag: orbit | Right "
-              "drag: pan"
-        : ground_mode_ && document_->ground() ? "Drag: select region | Ctrl-click: extend "
-                                                "selection | Shift + drag: orbit | Right drag: pan"
-        : inspect_ ? "Shift + left drag: orbit | Right drag: pan | Wheel: zoom"
-                   : "Click ground: select tile | Ctrl+click: select added asset | Shift + left "
-                     "drag: orbit | Right drag: pan | Wheel: zoom");
+    if (ImGui::Button("Controls"))
+        ImGui::OpenPopup("Authoring controls");
+    if (ImGui::BeginPopup("Authoring controls")) {
+        ImGui::TextWrapped(
+            ground_mode_ && document_->ground() &&
+                    (ground_transform_tool_ == Mesh || (ground_transform_tool_ == Vertices &&
+                                                        !document_->ground()->triangles.empty()))
+                ? "Click: select | Drag: box select | Ctrl: add/toggle | Arrows: move"
+            : ground_mode_ && document_->ground() && ground_transform_tool_ >= Sculpt &&
+                    ground_transform_tool_ <= BlendBrush && stage_ != AuthoringStage::Review
+                ? "Drag: brush | Alt: reverse height | Escape: cancel"
+            : ground_mode_ && document_->ground()
+                ? "Drag: select region | Ctrl-click: extend selection"
+            : inspect_ ? "Inspect asset"
+                       : existing_mode_ ? "Click surface: choose placement | Ctrl+click: select added asset" : "Click ground: select tile | Ctrl+click: select added asset");
+        ImGui::TextWrapped("%s", viewport_navigation_help);
+        ImGui::EndPopup();
+    }
     if (preview_)
         ImGui::TextColored({1, .8f, .25f, 1},
                            "Unapplied placement preview: Apply or Cancel in Placement details");
@@ -1141,6 +1145,7 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
     ImGui::Image(ImTextureID(ImGuiRenderer::image_id(texture, false, ImGuiRenderer::preview_3ds)),
                  size, {0, flip ? 1.f : 0.f}, {1, flip ? 0.f : 1.f});
     const auto origin = ImGui::GetItemRectMin();
+    if (!renderer_.ready()) ImGui::GetWindowDrawList()->AddText({origin.x+12,origin.y+12}, IM_COL32(255,255,255,255), "Updating preview...");
     const bool hovered = ImGui::IsItemHovered();
     const auto project = [&](SpatialPoint point, ImVec2 &screen) {
         float a[4]{}, b[4]{};
@@ -1160,6 +1165,14 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
         if (!inspect_) {
             auto *overlay = ImGui::GetWindowDrawList();
             overlay->PushClipRect(origin, {origin.x + size.x, origin.y + size.y}, true);
+            if (existing_mode_ && surface_position_) {
+                ImVec2 point;
+                if (project(*surface_position_, point)) {
+                    overlay->AddCircle(point, 7, IM_COL32(100, 240, 185, 255), 20, 2);
+                    overlay->AddLine({point.x-12,point.y}, {point.x+12,point.y}, IM_COL32(100,240,185,255));
+                    overlay->AddLine({point.x,point.y-12}, {point.x,point.y+12}, IM_COL32(100,240,185,255));
+                }
+            }
             for (const auto &instance : shown_)
                 if (instance.collision) {
                     const auto corners = object_collision_corners(instance);
@@ -1177,24 +1190,12 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
                 }
             overlay->PopClipRect();
         }
-        const bool handle_input = brush_input(origin, size, project, hovered) ||
+        const bool handle_input = object_interaction(origin, size, project, hovered) ||
+                                  brush_input(origin, size, project, hovered) ||
                                   ground_handles(origin, size, project, hovered);
         if (hovered && !handle_input && !io.WantTextInput &&
             (SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS)) {
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
-                (io.KeyShift && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))
-                camera.rotate(io.MouseDelta.x, io.MouseDelta.y, false);
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
-                camera.pan(io.MouseDelta.x, io.MouseDelta.y);
-            camera.wheel(io.MouseWheel, false);
-            if (!io.KeyCtrl) {
-                const auto key = [](ImGuiKey k) {
-                    return ImGui::IsKeyDown(k) ? 1.f : 0.f;
-                };
-                camera.fly(key(ImGuiKey_D) - key(ImGuiKey_A), key(ImGuiKey_E) - key(ImGuiKey_Q),
-                           key(ImGuiKey_W) - key(ImGuiKey_S), io.DeltaTime,
-                           io.KeyShift ? 4.f : 1.f);
-            }
+            viewport_navigation(camera, window_, true);
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 cancel_preview();
                 if (selected_)
@@ -1211,6 +1212,11 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
                     const auto right = camera.right(), up = camera.up();
                     for (unsigned axis = 0; axis < 3; ++axis)
                         direction[axis] += right[axis] * x + up[axis] * y;
+                    if (existing_mode_) {
+                        surface_position_ = pick_map_surface(*authoring_base_, eye, direction,
+                            cutaway_ ? std::min(cut_height_, ground_ceiling_) : ground_ceiling_);
+                        return std::optional<AuthoringTile>{};
+                    }
                     auto hit = pick_authoring_ground(
                         authoring_base_->spatial, eye, direction,
                         cutaway_ ? std::min(cut_height_, ground_ceiling_) : ground_ceiling_);
@@ -1249,10 +1255,12 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
                                                height, view, projection, true, cutaway_,
                                                cut_height_, false);
                     else {
+                        if(stage_ == AuthoringStage::Objects)
+                            renderer_.request_pick(resolution.pixel_x(io.MousePos.x-origin.x), resolution.pixel_y(io.MousePos.y-origin.y), width, height, view, projection, true, cutaway_,cut_height_,false);
                         tile_ = ground_hit();
                         region_end_.reset();
                         selected_ = 0;
-                        status_ = tile_ ? "Tile selected. Preview an asset here, then Place asset."
+                        status_ = existing_mode_ ? (surface_position_ ? "Surface selected. Preview an asset here, then Place asset." : "No map surface at this point.") : tile_ ? "Tile selected. Preview an asset here, then Place asset."
                                         : "No supported ground tile at this point.";
                     }
                 }
@@ -1308,7 +1316,7 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
                     }
             draw->PopClipRect();
         }
-        if (!inspect_ && show_grid_ &&
+        if (!existing_mode_ && !inspect_ && show_grid_ &&
             (!document_->ground() || document_->ground()->triangles.empty())) {
             const auto &grid = document_->grid();
             const auto anchor = document_->ground() ? std::optional(AuthoringTile{0, 0})
@@ -1366,7 +1374,7 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
                 draw->PopClipRect();
             }
         }
-        if (!inspect_ && show_grid_ && document_->ground() &&
+        if (!existing_mode_ && !inspect_ && show_grid_ && document_->ground() &&
             !document_->ground()->triangles.empty()) {
             auto *draw = ImGui::GetWindowDrawList();
             draw->PushClipRect(origin, {origin.x + size.x, origin.y + size.y}, true);
@@ -1388,6 +1396,11 @@ void MapAuthoringWorkspace::viewport(std::uint32_t frame) {
             draw->PopClipRect();
         }
     } catch (const std::exception &error) {
+        if(object_axis_>=0 || object_drag_resource_) {
+            object_axis_=-1;object_drag_resource_.reset();object_drop_preview_=false;
+            object_drag_canceled_=ImGui::IsMouseDown(ImGuiMouseButton_Left);
+            cancel_preview();
+        }
         if (ground_handle_)
             cancel_ground_drag();
         error_ = error.what();

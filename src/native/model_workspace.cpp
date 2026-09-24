@@ -1,3 +1,9 @@
+#include "native/undo_shortcuts.h"
+#include "native/inspector_selector.h"
+#include "assets/overworld_character_asset.h"
+#include "core/digest.h"
+#include "authoring/object_export.h"
+#include "native/viewport_navigation.h"
 #include "native/tutorial_widgets.h"
 #include "native/cry_editor.h"
 #include "native/theme.h"
@@ -47,6 +53,10 @@ ModelWorkspace::~ModelWorkspace() {
         library_job_.wait();
     if (clothing_job_.valid())
         clothing_job_.wait();
+    if (effects_job_.valid())
+        effects_job_.wait();
+    if (bgfx::isValid(effect_texture_))
+        bgfx::destroy(effect_texture_);
 }
 void ModelWorkspace::refresh(const std::filesystem::path &dump, const ArchiveSources &archives) {
     if (job_.valid() || catalog_job_.valid())
@@ -110,6 +120,16 @@ void ModelWorkspace::request_leave(std::function<void()> action) {
     });
 }
 void ModelWorkspace::poll() {
+    if (effects_job_.valid() &&
+        effects_job_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        try {
+            effects_ = effects_job_.get();
+            status_ = std::to_string(effects_.size()) + " effect resources available";
+        } catch (const std::exception &e) {
+            error_ = e.what();
+            status_ = "Effect catalog could not be loaded";
+        }
+
     if (clothing_job_.valid() &&
         clothing_job_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         try {
@@ -166,10 +186,13 @@ void ModelWorkspace::poll() {
             }
             refresh_inspector_.reset();
             renderer_.set_scene(document_->scene);
+            renderer_.weather_effect = document_->scene->weather_particles.empty() ? 0 : 1;
             renderer_.playback.seconds = 0;
             selection_ = {};
             bone_ = -1;
             fit();
+            if (document_->scene->draws.empty())
+                camera_.fit({-100, -100, -100}, {100, 100, 100});
             camera_.yaw = .4f;
             camera_.pitch = .2f;
             status_ = document_->name;
@@ -211,7 +234,7 @@ bool ModelWorkspace::apply(const MaterialDocument &edit) {
         auto &source = edit.model.sources.at(link.source);
         bool matches =
             std::any_of(document_->sources.begin(), document_->sources.end(), [&](auto &candidate) {
-                return candidate.member == source.member &&
+                return candidate.member == source.member && candidate.subfile == source.subfile &&
                        document_->archive_sources.resolve(document_->dump, candidate.archive) ==
                            edit.model.archive_sources.resolve(edit.model.dump, source.archive);
             });
@@ -257,6 +280,10 @@ bool ModelWorkspace::apply(const MaterialDocument &edit) {
     return true;
 }
 void ModelWorkspace::refresh_library() {
+    if (category_ == 8) {
+        refresh_effects();
+        return;
+    }
     if (category_ == 7) {
         refresh_clothing();
         return;
@@ -291,8 +318,8 @@ void ModelWorkspace::open_library(const std::filesystem::path &path, ModelCatego
     });
 }
 void ModelWorkspace::browse(const char *dump, const ArchiveSources &archives) {
-    bool busy =
-        job_.valid() || catalog_job_.valid() || library_job_.valid() || clothing_job_.valid();
+    bool busy = job_.valid() || catalog_job_.valid() || library_job_.valid() ||
+                clothing_job_.valid() || effects_job_.valid();
     bool stale =
         dump_ != std::filesystem::u8path(dump) || archive_sources_.pokemon != archives.pokemon;
     if (!busy && *dump && (stale || refresh_requested_)) {
@@ -322,13 +349,14 @@ void ModelWorkspace::browse(const char *dump, const ArchiveSources &archives) {
             }
         }
     }
-    ImGui::Begin("Models");
+    ImGui::Begin("Model browser");
     static const char *categories[] = {
-        "Pokemon",      "Battle characters", "Field characters & props", "Poke Balls",
-        "Battle props", "Poke Beans",        "Battle arena parts",       "Clothing"};
+        "Pokemon",       "Battle characters", "Field characters & props", "Poke Balls",
+        "Battle props",  "Poke Beans",        "Battle arena parts",       "Clothing",
+        "Battle effects"};
     ImGui::BeginDisabled(busy || library_dialog_category_ >= 0 || clothing_dialog_slot_ >= 0);
     ImGui::SetNextItemWidth(-1);
-    if (ImGui::Combo("##model-category", &category_, categories, 8)) {
+    if (ImGui::Combo("##model-category", &category_, categories, 9)) {
         chosen_ = -1;
         search_[0] = 0;
         error_.clear();
@@ -339,6 +367,11 @@ void ModelWorkspace::browse(const char *dump, const ArchiveSources &archives) {
         busy = true;
     }
     ImGui::EndDisabled();
+    if (category_ == 8) {
+        browse_effects(busy);
+        ImGui::End();
+        return;
+    }
     if (category_ == 7) {
         browse_clothing(busy);
         ImGui::End();
@@ -349,36 +382,46 @@ void ModelWorkspace::browse(const char *dump, const ArchiveSources &archives) {
                   : archives.resolve(std::filesystem::u8path(dump), TargetProfile::pokemon_archive);
     if (category_ && source.empty())
         source = dump_ / model_category_archive(ModelCategory(category_ - 1));
-    ImGui::TextWrapped("%s", source.string().c_str());
-    ImGui::BeginDisabled(busy || library_dialog_category_ >= 0 || (!*dump && !category_));
-    if (studio::TutorialWidgets::Button("model_workspace", "Refresh catalog")) {
-        if (category_)
-            refresh_library();
-        else
-            refresh(std::filesystem::u8path(dump), archives);
-        busy = true;
-    }
-    if (category_) {
-        ImGui::SameLine();
-        if (!project_store() &&
-            studio::TutorialWidgets::Button("model_workspace", "External GARC...")) {
-            library_dialog_category_ = category_ - 1;
-            choose_archive(window_, library_dialog_, source.string().c_str());
+    if (ImGui::SmallButton("Library options"))
+        ImGui::OpenPopup("Model library options");
+    if (ImGui::BeginPopup("Model library options")) {
+        if (!project_store() && !category_ && ImGui::Button("Choose source archive")) {
+            inspector_page_ = "Source";
+            ImGui::CloseCurrentPopup();
         }
-        if (!project_store() && !library_archives_[category_ - 1].empty() &&
-            studio::TutorialWidgets::Button("model_workspace", "Use dump archive")) {
-            library_archives_[category_ - 1].clear();
-            refresh_library();
+        ImGui::TextWrapped("%s", source.string().c_str());
+        ImGui::BeginDisabled(busy || library_dialog_category_ >= 0 || (!*dump && !category_));
+        if (studio::TutorialWidgets::Button("model_workspace", "Refresh catalog")) {
+            if (category_)
+                refresh_library();
+            else
+                refresh(std::filesystem::u8path(dump), archives);
             busy = true;
         }
+        if (category_) {
+            ImGui::SameLine();
+            if (!project_store() &&
+                studio::TutorialWidgets::Button("model_workspace", "External GARC...")) {
+                library_dialog_category_ = category_ - 1;
+                choose_archive(window_, library_dialog_, source.string().c_str());
+            }
+            if (!project_store() && !library_archives_[category_ - 1].empty() &&
+                studio::TutorialWidgets::Button("model_workspace", "Use dump archive")) {
+                library_archives_[category_ - 1].clear();
+                refresh_library();
+                busy = true;
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::EndPopup();
     }
-    ImGui::EndDisabled();
     if (job_.valid() || library_job_.valid()) {
         ImGui::SameLine();
         if (studio::TutorialWidgets::Button("model_workspace", "Cancel"))
             cancel_ = true;
     }
-    ImGui::TextWrapped("%s", status_.c_str());
+    if (busy)
+        ImGui::TextWrapped("%s", status_.c_str());
     if (!error_.empty())
         ImGui::TextWrapped("%s", error_.c_str());
     ImGui::SetNextItemWidth(-1);
@@ -394,11 +437,12 @@ void ModelWorkspace::browse(const char *dump, const ArchiveSources &archives) {
     };
     auto count = category_ ? library_.size() : catalog_.size();
     ImGui::BeginDisabled(busy || stale || library_dialog_category_ >= 0);
-    if (!category_)
-        studio::TutorialWidgets::Checkbox("model_workspace", "Shiny textures", &shiny_);
-    if (chosen_ >= 0 && std::size_t(chosen_) < count && primary_button("Open model"))
+    if (!category_ &&
+        studio::TutorialWidgets::Checkbox("model_workspace", "Shiny textures", &shiny_) &&
+        chosen_ >= 0 && std::size_t(chosen_) < count)
         open_selected();
     ImGui::EndDisabled();
+    ImGui::BeginDisabled(busy || stale || library_dialog_category_ >= 0);
     ImGui::BeginChild("Model list", ImVec2(0, 0), ImGuiChildFlags_Borders);
     auto filter = lower(search_);
     std::vector<int> matches;
@@ -422,13 +466,13 @@ void ModelWorkspace::browse(const char *dump, const ArchiveSources &archives) {
             if (ImGui::Selectable(label(i).c_str(), chosen_ == i,
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
                 chosen_ = i;
-                if (!busy && !stale && library_dialog_category_ < 0 &&
-                    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                if (!busy && !stale && library_dialog_category_ < 0)
                     open_selected();
             }
             ImGui::PopID();
         }
     ImGui::EndChild();
+    ImGui::EndDisabled();
     ImGui::End();
 }
 void ModelWorkspace::draw(std::uint32_t frame, const char *dump, const ArchiveSources &archives) {
@@ -438,9 +482,12 @@ void ModelWorkspace::draw(std::uint32_t frame, const char *dump, const ArchiveSo
     if (!studio_)
         browse(dump, archives);
     if (studio_) {
+        asset_actions(std::filesystem::u8path(dump));
         if (editor_->document() && document_)
             editor_->document()->model.looping_effects = document_->looping_effects;
         editor_->draw(renderer_, selection_, std::filesystem::u8path(dump));
+        if (editor_->take_uv_request())
+            inspector_page_ = "UVs";
         if (editor_->document() && document_ &&
             document_->scene != editor_->document()->model.scene) {
             std::string selected_bone;
@@ -472,55 +519,68 @@ void ModelWorkspace::draw(std::uint32_t frame, const char *dump, const ArchiveSo
         }
     }
     details();
+    if (!studio_)
+        selection_.focus = false;
     if (studio_ && (!geometry_tab_ || !editor_->editing_available()) && document_)
         geometry_editor_.deactivate(*document_, renderer_);
+    if (studio_ && editor_->document() && document_) {
+        if (motion_editor_.take_mapping_request() || editor_->take_mapping_request())
+            uv_motion_editor_.open(selection_, editor_->texture_unit());
+        if (editor_->editing_available())
+            uv_motion_editor_.draw(*editor_->document(), *document_, renderer_, playing_, repeat_);
+        else
+            uv_motion_editor_.close(renderer_);
+        if (auto keyed = uv_motion_editor_.take_keyed())
+            motion_editor_.focus_uv(keyed->first, keyed->second);
+    }
     viewport(frame);
-    if (studio_)
+    if (studio_ && inspector_page_ == "UVs")
         editor_->uvs(renderer_, selection_);
-    else
-        material_inspector(document_ ? document_->scene.get() : nullptr, renderer_, selection_,
-                           "Model materials");
-    ImGui::Begin(studio_ ? "Studio source" : "Model source");
-    if (document_) {
-        if (ImGui::BeginTabBar("Model information")) {
-            if (studio::TutorialWidgets::BeginTabItem("model_workspace", "Source & dependencies")) {
-                ImGui::TextWrapped("%s", document_->name.c_str());
-                ImGui::TextWrapped("Dump: %s", document_->dump.string().c_str());
-                ImGui::TextWrapped(
-                    "%s", document_->kind == ModelAssetKind::ArchiveModel
-                              ? "Original member and resource locations retained for inspection."
-                              : "Original members and nested resource locations are retained for "
-                                "material editing and export.");
-                for (auto &s : document_->sources) {
-                    ImGui::PushID(int(&s - document_->sources.data()));
-                    if (ImGui::TreeNode(s.role.c_str())) {
-                        ImGui::TextWrapped(
-                            "%s / member %zu",
-                            document_->archive_sources.resolve(document_->dump, s.archive)
-                                .string()
-                                .c_str(),
-                            s.member);
-                        ImGui::TextWrapped("SHA-256: %s", s.hash.c_str());
-                        ImGui::Text("%zu decoded bytes", s.original.size());
-                        ImGui::TreePop();
+    if (inspector_page_ == "Source") {
+        ImGui::Begin(studio_ ? "Studio inspector" : "Model inspector");
+        if (document_) {
+            if (ImGui::BeginTabBar("Model information")) {
+                if (studio::TutorialWidgets::BeginTabItem("model_workspace",
+                                                          "Source & dependencies")) {
+                    ImGui::TextWrapped("%s", document_->name.c_str());
+                    ImGui::TextWrapped("Dump: %s", document_->dump.string().c_str());
+                    ImGui::TextWrapped(
+                        "%s",
+                        document_->kind == ModelAssetKind::ArchiveModel
+                            ? "Original member and resource locations retained for inspection."
+                            : "Original members and nested resource locations are retained for "
+                              "material editing and export.");
+                    for (auto &s : document_->sources) {
+                        ImGui::PushID(int(&s - document_->sources.data()));
+                        if (ImGui::TreeNode(s.role.c_str())) {
+                            ImGui::TextWrapped(
+                                "%s / member %zu / subfile %u",
+                                document_->archive_sources.resolve(document_->dump, s.archive)
+                                    .string()
+                                    .c_str(),
+                                s.member, s.subfile);
+                            ImGui::TextWrapped("SHA-256: %s", s.hash.c_str());
+                            ImGui::Text("%zu decoded bytes", s.original.size());
+                            ImGui::TreePop();
+                        }
+                        ImGui::PopID();
                     }
-                    ImGui::PopID();
+                    ImGui::EndTabItem();
                 }
-                ImGui::EndTabItem();
-            }
-            if (studio::TutorialWidgets::BeginTabItem("model_workspace", "Preview coverage")) {
-                for (auto &d : document_->scene->diagnostics) {
-                    ImGui::Bullet();
-                    ImGui::SameLine();
-                    ImGui::TextWrapped("%s", d.c_str());
+                if (studio::TutorialWidgets::BeginTabItem("model_workspace", "Preview coverage")) {
+                    for (auto &d : document_->scene->diagnostics) {
+                        ImGui::Bullet();
+                        ImGui::SameLine();
+                        ImGui::TextWrapped("%s", d.c_str());
+                    }
+                    ImGui::EndTabItem();
                 }
-                ImGui::EndTabItem();
+                ImGui::EndTabBar();
             }
-            ImGui::EndTabBar();
-        }
-    } else
-        ImGui::TextWrapped("Load a model to inspect its source and preview coverage.");
-    ImGui::End();
+        } else
+            ImGui::TextWrapped("Load a model to inspect its source and preview coverage.");
+        ImGui::End();
+    }
 }
 void ModelWorkspace::fit(int selected) {
     auto &scene = *document_->scene;
@@ -530,7 +590,10 @@ void ModelWorkspace::fit(int selected) {
     std::array<float, 3> low{INFINITY, INFINITY, INFINITY}, high{-INFINITY, -INFINITY, -INFINITY};
     bool found = false;
     for (unsigned i = 0; i < scene.draws.size(); ++i) {
-        if (!renderer_.draw_visible(i) || (selected >= 0 ? i != unsigned(selected) : !visible[i]))
+        if (!renderer_.draw_visible(i) ||
+            (selected >= 0 ? (selection_.meshes.empty() ? i != unsigned(selected)
+                                                        : !selection_.mesh_selected(int(i)))
+                           : !visible[i]))
             continue;
         auto &d = scene.draws[i];
         for (auto &v : d.vertices) {
@@ -576,17 +639,17 @@ void ModelWorkspace::send_to_studio() {
 void ModelWorkspace::details() {
     bool was_geometry = geometry_tab_;
     geometry_tab_ = false;
-    ImGui::Begin(studio_ ? "Studio details" : "Model details");
+    ImGui::Begin(studio_ ? "Studio inspector" : "Model inspector");
     if (!document_) {
-        ImGui::TextWrapped(
-            "Choose a category and Open model. Double-clicking a list entry also opens it.");
+        if (!studio_)
+            ImGui::TextWrapped("Choose a model in the browser.");
         ImGui::End();
         return;
     }
     auto &scene = *document_->scene;
     ImGui::TextWrapped("%s", document_->name.c_str());
     ImGui::Text("%zu mesh parts | %zu materials", scene.draws.size(), scene.materials.size());
-    if (document_->is_pokemon()) {
+    if (document_->is_pokemon() && document_->independent_asset.empty()) {
         int part = document_->shadow_model ? 1 : 0;
         ImGui::BeginDisabled(job_.valid() || (studio_ && !editor_->editing_available()));
         bool changed =
@@ -630,48 +693,146 @@ void ModelWorkspace::details() {
         }
     }
     if (!studio_) {
-        bundle_editor_.draw(*document_, window_);
-        if (auto created = bundle_editor_.take_created())
-            studio_request_ = std::move(created);
-        ImGui::BeginDisabled(job_.valid());
+        ImGui::BeginDisabled(job_.valid() || scene.draws.empty());
         if (primary_button("Send to Studio", {-1, 0}))
             send_to_studio();
-        if (studio::TutorialWidgets::Button("model_workspace", "Use as material donor", {-1, 0}))
-            try {
-                shader_donor_ = std::make_unique<ModelDocument>(studio_asset());
-            } catch (const std::exception &e) {
-                error_ = e.what();
+        if (CharacterRegistrationEditor::accepts(*document_) &&
+            ImGui::Button("Register new character...", {-1, 0}))
+            inspector_page_ = "Register character";
+        if (ImGui::Button("More actions", {-1, 0}))
+            ImGui::OpenPopup("Model actions");
+        ImGui::SetNextWindowSize({320, 0});
+        if (ImGui::BeginPopup("Model actions")) {
+            if (studio::TutorialWidgets::Button("model_workspace", "Use as material donor",
+                                                {-1, 0}))
+                try {
+                    shader_donor_ = std::make_unique<ModelDocument>(studio_asset());
+                } catch (const std::exception &e) {
+                    error_ = e.what();
+                }
+            if (document_->kind == ModelAssetKind::ArchiveModel)
+                ImGui::TextWrapped(
+                    "Select a mesh to send its source model to Studio. Outfits open one "
+                    "part at a time.");
+            if (studio::TutorialWidgets::Button("model_workspace", "Reload from source", {-1, 0})) {
+                if (document_->clothing)
+                    open_clothing(*document_->clothing, document_->clothing_part, document_->dump);
+                else if (document_->battle_effect) {
+                    auto model = *document_;
+                    job_ = std::async(std::launch::async, [model] {
+                        const auto &source = model.sources.front();
+                        return load_effect_model(model.dump, source.member, source.subfile, {},
+                                                 model.effect_motions);
+                    });
+                } else if (document_->kind == ModelAssetKind::ArchiveModel) {
+                    auto &source = document_->sources.at(0);
+                    open_library(source.archive,
+                                 source.original[0] == 'B' ? ModelCategory::BattleArenas
+                                                           : ModelCategory::FieldCharacters,
+                                 {source.member, document_->name});
+                } else
+                    open(document_->pokemon, document_->shiny);
             }
-        if (document_->kind == ModelAssetKind::ArchiveModel)
-            ImGui::TextWrapped("Select a mesh to send its source model to Studio. Outfits open one "
-                               "part at a time.");
-        if (studio::TutorialWidgets::Button("model_workspace", "Reload from source", {-1, 0})) {
-            if (document_->clothing)
-                open_clothing(*document_->clothing, document_->clothing_part, document_->dump);
-            else if (document_->kind == ModelAssetKind::ArchiveModel) {
-                auto &source = document_->sources.at(0);
-                open_library(source.archive,
-                             source.original[0] == 'B' ? ModelCategory::BattleArenas
-                                                       : ModelCategory::FieldCharacters,
-                             {source.member, document_->name});
-            } else
-                open(document_->pokemon, document_->shiny);
+            ImGui::EndPopup();
         }
         ImGui::EndDisabled();
     }
-    if (ImGui::BeginTabBar("Inspect model", ImGuiTabBarFlags_FittingPolicyScroll)) {
-        if (document_->is_pokemon() &&
-            studio::TutorialWidgets::BeginTabItem("model_workspace", "Settings")) {
-            settings_editor_.draw();
-            ImGui::EndTabItem();
+    {
+        ImGui::Separator();
+        auto available_page = [&](const std::string &page) {
+            if (page == "Materials")
+                return !studio_;
+            if (page == "UVs")
+                return studio_;
+            if (page == "Overworld character")
+                return studio_ && can_convert_overworld_character(*document_);
+            if (page == "Register character")
+                return !studio_ && CharacterRegistrationEditor::accepts(*document_);
+            if (page == "Settings")
+                return document_->is_pokemon() && document_->independent_asset.empty();
+            if (page == "Cries")
+                return document_->independent_asset.empty() && cry_editor_ && !document_->shadow_model && document_->area < 0 &&
+                       document_->pokemon.species;
+            if (page == "Refresh")
+                return document_->independent_asset.empty() && document_->is_pokemon() && !document_->shadow_model;
+            if (page == "Geometry")
+                return studio_ && editor_->document() &&
+                       !document_->clothing;
+            if (page == "Blender")
+                return studio_ && editor_->document() && !document_->clothing;
+            if (page == "Motions")
+                return studio_ && editor_->document() && !document_->shadow_model;
+            return true;
+        };
+        if (!available_page(inspector_page_))
+            inspector_page_ = "Meshes";
+        InspectorSelectorStyle selector_style("Choose editing tool");
+        if (ImGui::BeginCombo("##inspector-page", inspector_page_.c_str())) {
+            for (const char *page :
+                 {"Meshes", "Materials", "Geometry", "UVs", "Skeleton", "Motions", "Blender",
+                  "Lighting", "Settings", "Overworld character", "Register character", "Cries", "Refresh", "Source"}) {
+                if (!available_page(page))
+                    continue;
+                if (ImGui::Selectable(page, inspector_page_ == page))
+                    inspector_page_ = page;
+            }
+            ImGui::EndCombo();
         }
-        if (studio::TutorialWidgets::BeginTabItem("model_workspace", "Meshes")) {
+        selector_style.end();
+        if (!studio_ && inspector_page_ == "Materials")
+            material_inspector(document_->scene.get(), renderer_, selection_, "Model inspector",
+                               true);
+        if (studio_ && inspector_page_ == "Overworld character" && editor_->document()) {
+            character_stage_requested_ |= character_registration_.draw_conversion(*editor_->document(), *document_);
+            if (character_registration_.take_motion_preview()) {
+                playing_ = true;
+                renderer_.playback.seconds = 0;
+                motion_group_ = int(document_->motions.at(document_->motion).group);
+            }
+        }
+        if (!studio_ && inspector_page_ == "Register character") {
+            character_stage_requested_ |= character_registration_.draw(*document_);
+            if (auto created = character_registration_.take_created())
+                studio_request_ = std::move(created);
+        }
+        if (!studio_ && inspector_page_ == "Settings") {
+            bundle_editor_.draw(*document_, window_);
+            if (auto created = bundle_editor_.take_created())
+                studio_request_ = std::move(created);
+        }
+    }
+    auto begin_page = [&](const char *name) {
+        return inspector_page_ == name;
+    };
+    {
+        if (document_->is_pokemon() && begin_page("Settings")) {
+            settings_editor_.draw();
+        }
+        if (begin_page("Meshes")) {
             if (studio::TutorialWidgets::Button("model_workspace", "Frame model"))
                 fit();
             ImGui::SameLine();
             if (studio::TutorialWidgets::Button("model_workspace", "Show all"))
                 renderer_.show_all_draws();
-            ImGui::TextWrapped("Visibility is preview-only; motion visibility still applies.");
+
+            if (ImGui::Button("Select all meshes")) {
+                selection_.meshes.clear();
+                for (unsigned i = 0; i < scene.draws.size(); ++i)
+                    selection_.meshes.insert(int(i));
+                if (!scene.draws.empty()) {
+                    selection_.draw = 0;
+                    selection_.material = int(scene.draws[0].material);
+                }
+            }
+            if (ImGui::GetWindowWidth() >= 330.f)
+                ImGui::SameLine();
+            if (ImGui::Button("Clear mesh selection")) {
+                selection_.meshes.clear();
+                selection_.draw = -1;
+            }
+            ImGui::TextDisabled("Visibility     Mesh selection");
+            float list_height = std::max(120.f, ImGui::GetContentRegionAvail().y - 125.f);
+            ImGui::BeginChild("##mesh-list", {0, list_height}, ImGuiChildFlags_Borders);
             for (unsigned i = 0; i < scene.draws.size(); ++i) {
                 auto &d = scene.draws[i];
                 ImGui::PushID(int(i));
@@ -685,29 +846,34 @@ void ModelWorkspace::details() {
                     ImGui::SetTooltip("Show or hide this mesh part");
                 ImGui::SameLine();
                 if (ImGui::Selectable((d.mesh + " / " + std::to_string(i)).c_str(),
-                                      selection_.draw == int(i))) {
-                    selection_.draw = int(i);
-                    selection_.material = int(d.material);
-                }
-                if (selection_.draw == int(i)) {
-                    ImGui::TextDisabled("%zu vertices | %zu triangles", d.vertices.size(),
-                                        d.indices.size() / 3);
-                    ImGui::TextWrapped("Material: %s", scene.materials[d.material].name.c_str());
-                    ImGui::Text("Bone palette: %zu", d.palette.size());
-                    if (studio::TutorialWidgets::Button("model_workspace", "Frame mesh"))
-                        fit(int(i));
-                    ImGui::SameLine();
-                    if (studio::TutorialWidgets::Button("model_workspace", "Isolate")) {
-                        for (unsigned j = 0; j < scene.draws.size(); ++j)
-                            renderer_.set_draw_visible(j, j == i);
-                    }
+                                      selection_.mesh_selected(int(i)))) {
+                    selection_.select_mesh(int(i), int(d.material), ImGui::GetIO().KeyCtrl);
+                    if (selection_.draw >= 0)
+                        selection_.material = int(scene.draws[selection_.draw].material);
                 }
                 ImGui::PopID();
             }
-            ImGui::EndTabItem();
+            ImGui::EndChild();
+            if (selection_.draw >= 0 && std::size_t(selection_.draw) < scene.draws.size()) {
+                auto &d = scene.draws[selection_.draw];
+                ImGui::Text("Mesh part %d | %zu selected", selection_.draw,
+                            selection_.meshes.empty() ? std::size_t(1) : selection_.meshes.size());
+                ImGui::TextDisabled("%zu vertices | %zu triangles", d.vertices.size(),
+                                    d.indices.size() / 3);
+                ImGui::Text("Material: %s", scene.materials[d.material].name.c_str());
+                ImGui::Text("Bone palette: %zu", d.palette.size());
+                if (studio::TutorialWidgets::Button("model_workspace", "Frame mesh"))
+                    fit(selection_.draw);
+                ImGui::SameLine();
+                if (studio::TutorialWidgets::Button("model_workspace", "Isolate")) {
+                    for (unsigned j = 0; j < scene.draws.size(); ++j)
+                        renderer_.set_draw_visible(j, selection_.mesh_selected(int(j)));
+                }
+            } else {
+                ImGui::TextDisabled("Select a mesh part to inspect it.");
+            }
         }
-        if (studio_ && editor_->document() && document_->area < 0 && !document_->clothing &&
-            studio::TutorialWidgets::BeginTabItem("model_workspace", "Geometry")) {
+        if (studio_ && editor_->document() && !document_->clothing && begin_page("Geometry")) {
             geometry_tab_ = true;
             if (!was_geometry)
                 refresh_inspector_.reset();
@@ -715,9 +881,8 @@ void ModelWorkspace::details() {
             geometry_editor_.panel(*editor_->document(), *document_, renderer_, playing_,
                                    selection_.material);
             ImGui::EndDisabled();
-            ImGui::EndTabItem();
         }
-        if (studio::TutorialWidgets::BeginTabItem("model_workspace", "Skeleton")) {
+        if (begin_page("Skeleton")) {
             studio::TutorialWidgets::Checkbox("model_workspace", "Show bones through model",
                                               &show_bones_);
             studio::TutorialWidgets::Checkbox("model_workspace", "Show influenced vertices",
@@ -779,33 +944,31 @@ void ModelWorkspace::details() {
                     ImGui::TextWrapped("Edit shared bones on Main model.");
                 ImGui::EndDisabled();
             }
-            ImGui::EndTabItem();
         }
-        if (studio_ && editor_->document() && !document_->clothing &&
-            studio::TutorialWidgets::BeginTabItem("model_workspace", "Blender")) {
+        if (studio_ && editor_->document() && !document_->clothing && begin_page("Blender")) {
             ImGui::BeginDisabled(!editor_->editing_available());
             model_exchange_editor_.draw(*editor_->document(), *document_, renderer_, playing_,
                                         window_);
             ImGui::EndDisabled();
-            ImGui::EndTabItem();
         }
-        if (document_->is_pokemon() && !document_->shadow_model &&
-            studio::TutorialWidgets::BeginTabItem("model_workspace", "Refresh")) {
+        if (document_->is_pokemon() && !document_->shadow_model && begin_page("Refresh")) {
             refresh_inspector_.draw(*document_, renderer_, selection_,
                                     studio_ && editor_->editing_available() ? editor_->document()
                                                                             : nullptr);
-            ImGui::EndTabItem();
         }
-        if (studio_ && editor_->document() && !document_->shadow_model &&
-            studio::TutorialWidgets::BeginTabItem("model_workspace", "Motions")) {
+        if (studio_ && editor_->document() && !document_->shadow_model && begin_page("Motions")) {
             ImGui::BeginDisabled(!editor_->editing_available());
             if (document_->area < 0 && !document_->clothing) {
                 studio::TutorialWidgets::RadioButton("model_workspace", "Materials", &motion_kind_,
                                                      0);
                 ImGui::SameLine();
-                if (studio::TutorialWidgets::RadioButton("model_workspace", "Bones", &motion_kind_,
-                                                         1))
+                if (studio::TutorialWidgets::RadioButton("model_workspace", "Pose", &motion_kind_,
+                                                         1)) {
                     playing_ = false;
+                    show_bones_ = true;
+                    document_->looping_effects = false;
+                    document_->select_motion(document_->motion, repeat_);
+                }
                 ImGui::SameLine();
                 if (studio::TutorialWidgets::RadioButton("model_workspace", "Visibility",
                                                          &motion_kind_, 2))
@@ -820,15 +983,12 @@ void ModelWorkspace::details() {
             else
                 motion_editor_.draw(*editor_->document(), *document_, renderer_, playing_, repeat_);
             ImGui::EndDisabled();
-            ImGui::EndTabItem();
         }
         if (cry_editor_ && !document_->shadow_model && document_->area < 0 &&
-            document_->pokemon.species &&
-            studio::TutorialWidgets::BeginTabItem("model_workspace", "Cries")) {
+            document_->pokemon.species && begin_page("Cries")) {
             cry_editor_->draw(*document_);
-            ImGui::EndTabItem();
         }
-        if (studio::TutorialWidgets::BeginTabItem("model_workspace", "Lighting")) {
+        if (begin_page("Lighting")) {
             ImGui::TextWrapped("Preview controls; these do not change game materials.");
             studio::TutorialWidgets::Checkbox("model_workspace", "Lighting",
                                               &renderer_.lighting.enabled);
@@ -852,17 +1012,209 @@ void ModelWorkspace::details() {
                     "Only affects materials without lighting tables. Authored tables retain their "
                     "full values because materials can use them for color and opacity.");
             ImGui::SliderFloat3("Direction", renderer_.lighting.direction.data(), -1, 1);
-            ImGui::EndTabItem();
         }
-        ImGui::EndTabBar();
     }
     ImGui::End();
+}
+void ModelWorkspace::open_independent(AssetPackage package, const std::filesystem::path &dump, const std::string &key) {
+    auto *store = project_store();
+    require(store != nullptr, "Open a project to edit independent assets");
+    auto load = [&](const AssetPackage &value) {
+        return text(value.at("type")) == "static" ? open_studio_object(value, dump)
+                                                  : open_independent_asset(value, dump);
+    };
+    auto model = load(package);
+    if (!key.empty()) model.independent_asset = key;
+    auto id = "studio-asset/" + model.independent_asset;
+    if (key.empty() && store->edits.contains(id)) {
+        model = load(decode_asset_package(read_file(store->document(id))));
+        model.independent_asset = id.substr(13);
+    } else if (key.empty()) {
+        store->capture({id, "studio-asset", model.name, "", {}}, encode_asset_package(package));
+        store->save();
+    }
+    open_document(std::move(model));
+}
+void ModelWorkspace::asset_actions(const std::filesystem::path &dump) {
+    ImGui::Begin("Studio viewport");
+    auto *store = project_store();
+    bool publish_object = false;
+    bool picking;
+    { std::lock_guard lock(asset_dialog_->mutex); picking = asset_dialog_->pending; }
+    ImGui::BeginDisabled(!store || !editor_->editing_available() || picking);
+    if (ImGui::Button("Asset...")) ImGui::OpenPopup("Studio asset actions");
+    if (ImGui::BeginPopup("Studio asset actions")) {
+        if (ImGui::MenuItem("Open asset file...")) editor_->request_leave([this] {
+            auto *owner = new std::shared_ptr<FolderSelection>(asset_dialog_);
+            static const SDL_DialogFileFilter filters[] = {{"Studio asset", "usum-asset"}};
+            asset_dialog_->pending = true;
+            SDL_ShowOpenFileDialog([](void *data, const char *const *files, int) {
+                std::unique_ptr<std::shared_ptr<FolderSelection>> owner(static_cast<std::shared_ptr<FolderSelection> *>(data));
+                auto &state = **owner; std::lock_guard lock(state.mutex);
+                state.pending = false; state.ready = true; state.path.clear(); state.error.clear();
+                if (!files) state.error = SDL_GetError(); else if (files[0]) state.path = files[0];
+            }, owner, window_, filters, 1, nullptr, false);
+        });
+        if (ImGui::MenuItem("Make independent copy", nullptr, false, document_ && !document_->shadow_model &&
+            (document_->is_pokemon() || (document_->area < 0 && !document_->clothing &&
+                !document_->sources.empty() && document_->sources.front().original.size() >= 2 &&
+                document_->sources.front().original[0] == 'C' && document_->sources.front().original[1] == 'M')))) {
+            auto package = model_asset_package(*editor_->document());
+            editor_->request_leave([this, package = std::move(package), dump] { open_independent(package, dump); });
+        }
+        if (ImGui::BeginMenu("Project assets")) {
+            std::string selected;
+            for (const auto &[key, edit] : store->edits)
+                if (edit.kind == "studio-asset" && ImGui::MenuItem((edit.label + "##" + key).c_str())) selected = key;
+            if (!selected.empty()) editor_->request_leave([this, selected, dump] {
+                open_independent(decode_asset_package(read_file(project_store()->document(selected))), dump, selected.substr(13));
+            });
+            ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem("Send to asset library...", nullptr, false,
+                            document_ && document_->project_asset)) {
+            auto name = document_->name;
+            std::snprintf(object_name_.data(), object_name_.size(), "%s", name.c_str());
+            publish_object = true;
+        }
+        if (ImGui::MenuItem("Create overworld character...", nullptr, false, document_ && can_convert_overworld_character(*document_)))
+            inspector_page_ = "Overworld character";
+        if (ImGui::MenuItem("Close model", nullptr, false, bool(document_))) editor_->request_leave([this] {
+            editor_->clear(); document_.reset(); renderer_.set_scene(std::make_shared<Environment>()); selection_ = {};
+        });
+        ImGui::EndPopup();
+    }
+    ImGui::EndDisabled();
+    if (publish_object) ImGui::OpenPopup("Save Studio object to library");
+        if (ImGui::BeginPopupModal("Save Studio object to library", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::InputText("Object name", object_name_.data(), object_name_.size());
+            ImGui::TextWrapped("Save a static object copy to this project's library. Add it to a map from Authoring > Asset Library > Project library.");
+            if (ImGui::Button("Save object")) {
+                try {
+                    auto package = export_studio_object(*editor_->document(), object_name_.data());
+                    auto key = "asset-library/" + sha256(package);
+                    auto previous = store->edits;
+                    try {
+                        store->capture({key, "asset-library", object_name_.data(), "", {}}, package);
+                        store->save();
+                    } catch (...) { store->edits = std::move(previous); throw; }
+                    error_ = "Object saved. Find it in Authoring > Asset Library > Project library.";
+                    ImGui::CloseCurrentPopup();
+                } catch (const std::exception &e) { error_ = e.what(); }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    object_import_dialog(dump);
+    if (!error_.empty()) ImGui::TextWrapped("%s", error_.c_str());
+    ImGui::End();
+    std::string path, error;
+    {
+        std::lock_guard lock(asset_dialog_->mutex);
+        if (!asset_dialog_->ready) return;
+        asset_dialog_->ready = false; path = asset_dialog_->path; error = asset_dialog_->error;
+    }
+    try {
+        require(error.empty(), error);
+        if (!path.empty()) {
+            auto package = decode_asset_package(read_file(std::filesystem::u8path(path)));
+            if (text(package.at("type")) == "new") {
+                auto geometry = parse_model_exchange(text(package.at("models/0.usum-model")));
+                require(geometry.joints.empty(), "Rigged assets need a character template. Open one in Studio and use Blender > Import from Blender.");
+                new_object_geometry_ = std::move(geometry);
+                new_object_materials_.assign(new_object_geometry_->meshes.size(), 0);
+                std::snprintf(object_name_.data(), object_name_.size(), "%s", text(package.at("name")).c_str());
+                object_templates_.clear();
+                new_object_template_.reset();
+                object_template_index_ = -1;
+                for (const auto &[key, edit] : store->edits)
+                    if (edit.kind == "asset-library")
+                        object_templates_.push_back({edit.label, decode_asset_package(read_file(store->document(key)))});
+                if (document_ && document_->project_asset)
+                    object_templates_.insert(object_templates_.begin(), {"Current Studio object", decode_asset_package(export_studio_object(*editor_->document(), document_->name))});
+                if (object_templates_.empty()) {
+                    auto catalog = load_map_resources(dump, 0);
+                    for (std::size_t i = 0; i < catalog.entries.size(); ++i) {
+                        auto &entry = catalog.entries[i];
+                        if (!entry.reusable_static()) continue;
+                        try {
+                            auto scene = preview_map_resource(dump, entry);
+                            auto asset = begin_project_asset(i, scene);
+                            asset.name = entry.name;
+                            object_templates_.push_back({entry.name, decode_asset_package(export_asset_package(dump, catalog, asset))});
+                        } catch (const std::exception &) { }
+                        if (object_templates_.size() >= 12) break;
+                    }
+                }
+                error_.clear();
+            } else
+                editor_->request_leave([this, package = std::move(package), dump] { open_independent(package, dump); });
+        }
+    } catch (const std::exception &e) { error_ = e.what(); }
+}
+void ModelWorkspace::object_import_dialog(const std::filesystem::path &dump) {
+    if (!new_object_geometry_) return;
+    if (!ImGui::IsPopupOpen("Open Blender object")) ImGui::OpenPopup("Open Blender object");
+    ImGui::SetNextWindowSize({620, 500}, ImGuiCond_FirstUseEver);
+    if (!ImGui::BeginPopupModal("Open Blender object", nullptr, ImGuiWindowFlags_None)) return;
+    ImGui::InputText("Object name", object_name_.data(), object_name_.size());
+    ImGui::TextWrapped("Choose game materials for this Blender object. The template remains unchanged; textures and materials can be edited in Studio afterward.");
+    auto choose = [&](int i) {
+        try {
+            new_object_template_ = std::make_unique<ModelDocument>(open_studio_object(object_templates_.at(i).second, dump));
+            object_template_exchange_ = MaterialDocument(*new_object_template_).model_exchange();
+            object_template_index_ = i;
+            std::fill(new_object_materials_.begin(), new_object_materials_.end(), 0);
+            error_.clear();
+        } catch (const std::exception &e) { error_ = e.what(); }
+    };
+    if (object_template_index_ < 0 && !object_templates_.empty()) choose(0);
+    if (ImGui::BeginCombo("Material template", object_template_index_ < 0 ? "No templates available" : object_templates_[object_template_index_].first.c_str())) {
+        for (unsigned i = 0; i < object_templates_.size(); ++i)
+            if (ImGui::Selectable(object_templates_[i].first.c_str(), object_template_index_ == int(i))) choose(int(i));
+        ImGui::EndCombo();
+    }
+    if (new_object_template_) {
+        const auto &exchange = object_template_exchange_;
+        ImGui::BeginChild("Object materials", {0, -110});
+        for (std::size_t i = 0; i < new_object_geometry_->meshes.size(); ++i) {
+            ImGui::PushID(int(i));
+            ImGui::TextWrapped("%s", new_object_geometry_->meshes[i].name.c_str());
+            auto label = [&](std::size_t m) { return exchange.meshes[m].name + " / " + exchange.meshes[m].texture; };
+            if (ImGui::BeginCombo("Game material", label(new_object_materials_[i]).c_str())) {
+                for (std::size_t m = 0; m < exchange.meshes.size(); ++m)
+                    if (ImGui::Selectable((label(m) + "##" + std::to_string(m)).c_str(), new_object_materials_[i] == m)) new_object_materials_[i] = m;
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        if (ImGui::Button("Open in Studio")) {
+            try {
+                auto package = new_studio_object(*new_object_template_, *new_object_geometry_, new_object_materials_, object_name_.data());
+                editor_->request_leave([this, package = std::move(package), dump] { open_independent(package, dump); });
+                new_object_geometry_.reset();
+                new_object_template_.reset();
+                object_templates_.clear();
+                error_.clear();
+                ImGui::CloseCurrentPopup();
+            } catch (const std::exception &e) { error_ = e.what(); }
+        }
+        ImGui::SameLine();
+    } else ImGui::TextWrapped("No static templates found. Add a native object to the project library first.");
+    if (ImGui::Button("Cancel")) {
+        new_object_geometry_.reset(); new_object_template_.reset(); object_templates_.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    if (!error_.empty()) ImGui::TextWrapped("%s", error_.c_str());
+    ImGui::EndPopup();
 }
 void ModelWorkspace::viewport(std::uint32_t frame) {
     ImGui::Begin(studio_ ? "Studio viewport" : "Model viewport");
     if (!document_) {
-        ImGui::TextWrapped("Browse the dump in Models to open an isolated model. Materials, "
-                           "textures and skeleton inspection share the map renderer.");
+        ImGui::TextWrapped(studio_ ? "Open an asset to begin."
+                                   : "Select a model in the browser to preview it.");
         ImGui::End();
         return;
     }
@@ -878,8 +1230,11 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
     refresh_inspector_.sync(*document_, renderer_);
     auto &io = ImGui::GetIO();
     if (auto picked = renderer_.poll_pick(frame)) {
-        selection_.draw = *picked;
-        selection_.material = *picked >= 0 ? int(document_->scene->draws[*picked].material) : -1;
+        selection_.select_mesh(*picked,
+                               *picked >= 0 ? int(document_->scene->draws[*picked].material) : -1,
+                               pick_additive_);
+        if (selection_.draw >= 0)
+            selection_.material = int(document_->scene->draws[selection_.draw].material);
         selection_.focus = *picked >= 0 && !renderer_.refresh.active();
         if (renderer_.refresh.active()) {
             renderer_.refresh.selected = -1;
@@ -898,98 +1253,133 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
         ImGui::End();
         return;
     }
-    const float toolbar_width = ImGui::GetContentRegionAvail().x;
-    if (document_->is_pokemon() && !document_->shadow_model) {
-        studio::TutorialWidgets::Checkbox("model_workspace", "Battle arena preview",
-                                          &settings_editor_.active);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Actual game arena and trainer; edit Pokemon settings in the Settings tab");
-    }
-    auto select_motion = [&](int index) {
-        document_->select_motion(index, repeat_);
-        renderer_.refresh_materials();
-    };
-    if (studio::TutorialWidgets::Button("model_workspace", playing_ ? "Pause" : "Play"))
-        playing_ = !playing_;
-    ImGui::SameLine();
-    if (studio::TutorialWidgets::Button("model_workspace", "Restart"))
-        renderer_.playback.seconds = 0;
-    ImGui::SameLine();
-    if (studio::TutorialWidgets::Checkbox("model_workspace", "Repeat", &repeat_) &&
-        document_->area < 0)
-        select_motion(document_->motion);
-    if (toolbar_width >= 27 * ImGui::GetFontSize())
+    {
+        if (ImGui::Button("Frame"))
+            fit(selection_.draw);
         ImGui::SameLine();
-    ImGui::SetNextItemWidth(85);
-    ImGui::DragFloat("Speed", &speed_, .05f, .05f, 4, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    if (document_->area < 0) {
-        ImGui::SetNextItemWidth(150);
-        if (document_->is_pokemon() &&
-            ImGui::Combo("Motion set", &motion_group_, TargetProfile::pokemon_motion_names.data(),
-                         4)) {
-            auto it =
-                std::find_if(document_->motions.begin(), document_->motions.end(), [&](auto &m) {
-                    return int(m.group) == motion_group_ && m.error.empty();
-                });
-            select_motion(it == document_->motions.end() ? -1
-                                                         : int(it - document_->motions.begin()));
-            renderer_.playback.seconds = 0;
+        if (ImGui::Button("Animation"))
+            animation_controls_open_ = !animation_controls_open_;
+        ImGui::SameLine();
+        if (ImGui::Button("Display"))
+            ImGui::OpenPopup("Model display");
+        ImGui::SameLine();
+        if (ImGui::Button("Controls"))
+            ImGui::OpenPopup("Model navigation");
+        if (ImGui::BeginPopup("Model navigation")) {
+            ImGui::TextUnformatted(viewport_navigation_help);
+            ImGui::TextUnformatted("Click: select | Ctrl+click: add/remove | F: frame selection");
+            ImGui::EndPopup();
         }
-        if (toolbar_width >= 36 * ImGui::GetFontSize())
-            ImGui::SameLine();
-        ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x -
-                                                    ImGui::CalcTextSize("Motion").x -
-                                                    ImGui::GetStyle().ItemInnerSpacing.x));
-        const char *current = document_->motion < 0
-                                  ? "Bind pose"
-                                  : document_->motions[document_->motion].name.c_str();
-        if (ImGui::BeginCombo("Motion", current)) {
-            if (ImGui::Selectable("Bind pose", document_->motion < 0)) {
-                select_motion(-1);
-                renderer_.playback.seconds = 0;
+    }
+    const float toolbar_width = 460.f;
+    if (animation_controls_open_) {
+        ImGui::SetNextWindowSize({480, 235}, ImGuiCond_FirstUseEver);
+        auto origin = ImGui::GetWindowPos();
+        ImGui::SetNextWindowPos({origin.x + 20, origin.y + 65}, ImGuiCond_FirstUseEver);
+        const bool visible = ImGui::Begin(studio_ ? "Studio animation" : "Model animation",
+                                          &animation_controls_open_, ImGuiWindowFlags_NoDocking);
+        if (visible) {
+            if (document_->is_pokemon() && !document_->shadow_model) {
+                studio::TutorialWidgets::Checkbox("model_workspace", "Battle arena preview",
+                                                  &settings_editor_.active);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Actual game arena and trainer; edit Pokemon settings in the Settings tab");
             }
-            for (unsigned i = 0; i < document_->motions.size(); ++i) {
-                auto &m = document_->motions[i];
-                if (document_->is_pokemon() && int(m.group) != motion_group_)
-                    continue;
-                ImGui::BeginDisabled(!m.error.empty());
-                if (ImGui::Selectable(m.name.c_str(), document_->motion == int(i))) {
-                    select_motion(int(i));
+            auto select_motion = [&](int index) {
+                document_->select_motion(index, repeat_);
+                renderer_.refresh_materials();
+            };
+            if (studio::TutorialWidgets::Button("model_workspace", playing_ ? "Pause" : "Play"))
+                playing_ = !playing_;
+            ImGui::SameLine();
+            if (studio::TutorialWidgets::Button("model_workspace", "Restart"))
+                renderer_.playback.seconds = 0;
+            ImGui::SameLine();
+            if (studio::TutorialWidgets::Checkbox("model_workspace", "Repeat", &repeat_) &&
+                document_->area < 0)
+                select_motion(document_->motion);
+            if (toolbar_width >= 27 * ImGui::GetFontSize())
+                ImGui::SameLine();
+            ImGui::SetNextItemWidth(85);
+            ImGui::DragFloat("Speed", &speed_, .05f, .05f, 4, "%.2fx",
+                             ImGuiSliderFlags_AlwaysClamp);
+            if (document_->area < 0) {
+                ImGui::SetNextItemWidth(150);
+                if (document_->is_pokemon() &&
+                    ImGui::Combo("Motion set", &motion_group_,
+                                 TargetProfile::pokemon_motion_names.data(), 4)) {
+                    auto it = std::find_if(
+                        document_->motions.begin(), document_->motions.end(), [&](auto &m) {
+                            return int(m.group) == motion_group_ && m.error.empty();
+                        });
+                    select_motion(
+                        it == document_->motions.end() ? -1 : int(it - document_->motions.begin()));
                     renderer_.playback.seconds = 0;
                 }
-                ImGui::EndDisabled();
-                if (!m.error.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("%s", m.error.c_str());
+                if (toolbar_width >= 36 * ImGui::GetFontSize())
+                    ImGui::SameLine();
+                ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x -
+                                                            ImGui::CalcTextSize("Motion").x -
+                                                            ImGui::GetStyle().ItemInnerSpacing.x));
+                const char *current = document_->motion < 0
+                                          ? "Bind pose"
+                                          : document_->motions[document_->motion].name.c_str();
+                if (ImGui::BeginCombo("Motion", current)) {
+                    if (ImGui::Selectable("Bind pose", document_->motion < 0)) {
+                        select_motion(-1);
+                        renderer_.playback.seconds = 0;
+                    }
+                    for (unsigned i = 0; i < document_->motions.size(); ++i) {
+                        auto &m = document_->motions[i];
+                        if (document_->is_pokemon() && int(m.group) != motion_group_)
+                            continue;
+                        ImGui::BeginDisabled(!m.error.empty());
+                        if (ImGui::Selectable(m.name.c_str(), document_->motion == int(i))) {
+                            select_motion(int(i));
+                            renderer_.playback.seconds = 0;
+                        }
+                        ImGui::EndDisabled();
+                        if (!m.error.empty() &&
+                            ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("%s", m.error.c_str());
+                    }
+                    ImGui::EndCombo();
+                }
             }
-            ImGui::EndCombo();
+            if (document_->is_pokemon()) {
+                if (studio::TutorialWidgets::Checkbox("model_workspace", "Looping effects",
+                                                      &document_->looping_effects))
+                    select_motion(document_->motion);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Play the motion set's looping overlay alongside its main action. "
+                        "Select an overlay in Motion to inspect it alone.");
+                if (document_->looping_overlay >= 0) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled(
+                        "%s", document_->motions[document_->looping_overlay].name.c_str());
+                }
+            }
+            if (studio_) {
+                studio::TutorialWidgets::Checkbox("model_workspace", "Preview material motions",
+                                                  &renderer_.playback.materials);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Includes looping material effects. Disable to inspect the base "
+                        "material values being edited");
+            }
         }
-    }
-    if (document_->is_pokemon()) {
-        if (studio::TutorialWidgets::Checkbox("model_workspace", "Looping effects",
-                                              &document_->looping_effects))
-            select_motion(document_->motion);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Play the motion set's looping overlay alongside its main action. "
-                              "Select an overlay in Motion to inspect it alone.");
-        if (document_->looping_overlay >= 0) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s", document_->motions[document_->looping_overlay].name.c_str());
-        }
-    }
-    if (studio_) {
-        studio::TutorialWidgets::Checkbox("model_workspace", "Preview material motions",
-                                          &renderer_.playback.materials);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Includes looping material effects. Disable to inspect the base "
-                              "material values being edited");
+        ImGui::End();
     }
     bool bone_handles = !document_->shadow_model && !geometry_tab_ && studio_ &&
-                        motion_kind_ == 1 && document_->area < 0 && !document_->clothing &&
-                        !renderer_.refresh.active() && editor_->document() &&
-                        editor_->editing_available();
+                        inspector_page_ == "Motions" && motion_kind_ == 1 && document_->area < 0 &&
+                        !document_->clothing && !renderer_.refresh.active() &&
+                        editor_->document() && editor_->editing_available();
     if (bone_handles)
         bone_gizmo_.toolbar();
+    else if (editor_ && editor_->document())
+        bone_gizmo_.cancel(*editor_->document(), *document_, repeat_);
     float duration =
         document_->motion >= 0
             ? std::max({document_->motions[document_->motion].skeletal.frames,
@@ -1009,6 +1399,8 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
     }
     if (refresh_inspector_.painting())
         playing_ = false;
+    if (!document_->scene->weather_particles.empty())
+        duration = std::max(duration, 30.f);
     if (playing_ && renderer_.ready() && duration > 0) {
         renderer_.playback.seconds += std::min(io.DeltaTime, .1f) * speed_;
         if (!repeat_ && document_->looping_overlay < 0 && renderer_.playback.seconds >= duration) {
@@ -1020,58 +1412,62 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
                      ? float(repeat_ ? std::fmod(renderer_.playback.seconds, duration)
                                      : std::min(renderer_.playback.seconds, double(duration)))
                      : 0;
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::SliderFloat("##model-time", &time, 0, std::max(duration, .01f), "%.2f seconds")) {
-        renderer_.playback.seconds = time;
-        playing_ = false;
-    }
+    auto time_slider = [&] {
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##model-time", &time, 0, std::max(duration, .01f),
+                               "%.2f seconds")) {
+            renderer_.playback.seconds = time;
+            playing_ = false;
+        }
+    };
     if (settings_editor_.active) {
+        time_slider();
         settings_editor_.viewport(*document_, renderer_.playback.seconds);
         ImGui::End();
         return;
     }
-    ImGui::BeginDisabled(renderer_.refresh.active());
-    studio::TutorialWidgets::Checkbox("model_workspace", "Outlines", &renderer_.outlines);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Game-style material outlines. Preview only; does not change exported assets.");
-    ImGui::SameLine();
-    studio::TutorialWidgets::Checkbox("model_workspace", "Wireframe", &renderer_.wireframe);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Triangle edges, including back faces. Ctrl+click still selects surfaces.");
-    ImGui::EndDisabled();
-    if (toolbar_width >= 27 * ImGui::GetFontSize())
+    ImGui::SetNextWindowSize({380, 0}, ImGuiCond_Appearing);
+    if (ImGui::BeginPopup("Model display")) {
+        ImGui::Checkbox("PICA float24 UV precision", &renderer_.pica_texture_precision);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Round texture coordinates to 16 fraction bits before sampling. "
+                              "Experimental approximation; preview only.");
+        ImGui::BeginDisabled(renderer_.refresh.active());
+        studio::TutorialWidgets::Checkbox("model_workspace", "Outlines", &renderer_.outlines);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Game-style material outlines. Preview only; does not change exported assets.");
         ImGui::SameLine();
-    if (studio::TutorialWidgets::SmallButton("model_workspace", "Background"))
-        ImGui::OpenPopup("Viewport background");
-    if (ImGui::BeginPopup("Viewport background")) {
-        auto packed = renderer_.background_color;
-        float color[3] = {float((packed >> 24) & 255) / 255, float((packed >> 16) & 255) / 255,
-                          float((packed >> 8) & 255) / 255};
-        if (ImGui::ColorPicker3("##background", color,
-                                ImGuiColorEditFlags_NoSidePreview |
-                                    ImGuiColorEditFlags_NoSmallPreview))
-            renderer_.background_color = (std::uint32_t(color[0] * 255 + .5f) << 24) |
-                                         (std::uint32_t(color[1] * 255 + .5f) << 16) |
-                                         (std::uint32_t(color[2] * 255 + .5f) << 8) | 255u;
-        if (studio::TutorialWidgets::Button("model_workspace", "Dark"))
-            renderer_.background_color = 0x17232bffu;
-        ImGui::SameLine();
-        if (studio::TutorialWidgets::Button("model_workspace", "Gray"))
-            renderer_.background_color = 0x808080ffu;
-        ImGui::SameLine();
-        if (studio::TutorialWidgets::Button("model_workspace", "Light"))
-            renderer_.background_color = 0xe8e8e8ffu;
-        ImGui::TextUnformatted("Preview only");
-        ImGui::EndPopup();
-    }
-    ImGui::SameLine();
-    if (studio::TutorialWidgets::SmallButton("model_workspace", "Controls"))
-        ImGui::OpenPopup("Viewport controls");
-    if (ImGui::BeginPopup("Viewport controls")) {
-        ImGui::TextUnformatted("Ctrl+click: select material or Refresh category\nLeft drag: "
-                               "orbit\nMiddle / right drag: pan\nWheel: zoom\nF: frame model");
+        studio::TutorialWidgets::Checkbox("model_workspace", "Wireframe", &renderer_.wireframe);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Triangle edges, including back faces. Ctrl+click still selects surfaces.");
+        ImGui::EndDisabled();
+        if (toolbar_width >= 27 * ImGui::GetFontSize())
+            ImGui::SameLine();
+        if (studio::TutorialWidgets::SmallButton("model_workspace", "Background"))
+            ImGui::OpenPopup("Viewport background");
+        if (ImGui::BeginPopup("Viewport background")) {
+            auto packed = renderer_.background_color;
+            float color[3] = {float((packed >> 24) & 255) / 255, float((packed >> 16) & 255) / 255,
+                              float((packed >> 8) & 255) / 255};
+            if (ImGui::ColorPicker3("##background", color,
+                                    ImGuiColorEditFlags_NoSidePreview |
+                                        ImGuiColorEditFlags_NoSmallPreview))
+                renderer_.background_color = (std::uint32_t(color[0] * 255 + .5f) << 24) |
+                                             (std::uint32_t(color[1] * 255 + .5f) << 16) |
+                                             (std::uint32_t(color[2] * 255 + .5f) << 8) | 255u;
+            if (studio::TutorialWidgets::Button("model_workspace", "Dark"))
+                renderer_.background_color = 0x17232bffu;
+            ImGui::SameLine();
+            if (studio::TutorialWidgets::Button("model_workspace", "Gray"))
+                renderer_.background_color = 0x808080ffu;
+            ImGui::SameLine();
+            if (studio::TutorialWidgets::Button("model_workspace", "Light"))
+                renderer_.background_color = 0xe8e8e8ffu;
+            ImGui::TextUnformatted("Preview only");
+            ImGui::EndPopup();
+        }
         ImGui::EndPopup();
     }
     if (renderer_.refresh.active())
@@ -1080,9 +1476,10 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
             renderer_.refresh.selected >= 0
                 ? std::string(refresh_region_label(std::uint8_t(renderer_.refresh.selected)))
                       .c_str()
-            : refresh_inspector_.painting() ? "painting | Shift+drag to orbit"
+            : refresh_inspector_.painting() ? "painting | Middle drag to orbit"
                                             : "all categories | Ctrl+click to select");
     auto size = ImGui::GetContentRegionAvail();
+    size.y = std::max(1.f, size.y - ImGui::GetFrameHeightWithSpacing());
     auto resolution = ImGuiRenderer::viewport_resolution(size.x, size.y);
     size = {resolution.display_width, resolution.display_height};
     unsigned width = resolution.width, height = resolution.height;
@@ -1093,7 +1490,18 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
                   bx::Handedness::Right);
     bx::mtxProj(projection, 45, float(width) / height, camera_.near_clip(), camera_.far_clip(),
                 bgfx::getCaps()->homogeneousDepth, bx::Handedness::Right);
-    renderer_.select_draw(selection_.draw);
+    if (!studio_ && category_ == 8 && effect_camera_preview_ && effect_camera_) {
+        auto pose = effect_camera_->sample(effect_camera_frame_);
+        bx::mtxLookAt(view, {pose.eye[0], pose.eye[1], pose.eye[2]},
+                      {pose.target[0], pose.target[1], pose.target[2]},
+                      {pose.up[0], pose.up[1], pose.up[2]}, bx::Handedness::Right);
+        bx::mtxProj(projection, pose.fov, float(width) / height, pose.near_clip, pose.far_clip,
+                    bgfx::getCaps()->homogeneousDepth, bx::Handedness::Right);
+    }
+    if (!selection_.meshes.empty())
+        renderer_.select_draws(selection_.meshes);
+    else
+        renderer_.select_draw(selection_.draw);
     auto texture = renderer_.render(width, height, view, projection, true, false, 0, false);
     bool flip = bgfx::getCaps()->originBottomLeft;
     ImGui::Image(ImTextureID(ImGuiRenderer::image_id(texture, false, ImGuiRenderer::preview_3ds)),
@@ -1109,21 +1517,20 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
         geometry_tab_ && editor_->editing_available() &&
         geometry_editor_.viewport(*editor_->document(), *document_, renderer_, camera_, view,
                                   projection, origin, size, hovered);
-    if (hovered && !bone_captured && !geometry_captured && !io.WantTextInput) {
-        if (io.KeyCtrl && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
-            io.MouseDragMaxDistanceSqr[0] < io.MouseDragThreshold * io.MouseDragThreshold)
+    if (bone_captured || geometry_captured) studio::UndoShortcuts::block("material_editor");
+    if (hovered && (!bone_captured || viewport_navigating()) &&
+        (!geometry_captured || viewport_navigating()) && !io.WantTextInput) {
+        if (!viewport_navigating() && (!refresh_inspector_.painting() || io.KeyCtrl) &&
+            ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+            io.MouseDragMaxDistanceSqr[0] < io.MouseDragThreshold * io.MouseDragThreshold) {
+            pick_additive_ = io.KeyCtrl;
             renderer_.request_pick(resolution.pixel_x(io.MousePos.x - origin.x),
                                    resolution.pixel_y(io.MousePos.y - origin.y), width, height,
                                    view, projection, true, false, 0, false);
-        if (!io.KeyCtrl && (!refresh_inspector_.painting() || io.KeyShift) &&
-            ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-            camera_.rotate(io.MouseDelta.x, io.MouseDelta.y, false);
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
-            ImGui::IsMouseDragging(ImGuiMouseButton_Right))
-            camera_.pan(io.MouseDelta.x, io.MouseDelta.y);
-        camera_.wheel(io.MouseWheel, false);
+        }
+        viewport_navigation(camera_, window_, hovered);
         if (ImGui::IsKeyPressed(ImGuiKey_F))
-            fit();
+            fit(selection_.draw);
     }
     refresh_inspector_.paint(studio_ && editor_->editing_available() ? editor_->document()
                                                                      : nullptr,
@@ -1134,6 +1541,15 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
     }
     if (show_bones_ || show_weights_)
         bones(view, projection, origin, size);
+    {
+        if (ImGui::Button(playing_ ? "Pause" : "Play"))
+            playing_ = !playing_;
+        ImGui::SameLine();
+        if (ImGui::Button("Restart"))
+            renderer_.playback.seconds = 0;
+        ImGui::SameLine();
+        time_slider();
+    }
     ImGui::End();
 }
 void ModelWorkspace::bones(const float *view, const float *projection, ImVec2 origin, ImVec2 size) {

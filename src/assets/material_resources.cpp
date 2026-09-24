@@ -6,7 +6,7 @@
 namespace studio {
 namespace {
 const AssetResourceLink &model_link(const ModelDocument &model) {
-    require(model.area < 0 && !model.clothing,
+    require((model.area < 0 || model.project_asset) && !model.clothing,
             "Send an individual model to Studio to manage its resources");
     return model.resources.at(model.material_resources.front());
 }
@@ -84,6 +84,47 @@ void MaterialDocument::add_material(std::size_t donor, const std::string &name) 
     auto link = model_link(snapshot);
     auto bytes = copy_model_material(edit.read(link), donor, name);
     edit.write(link, bytes);
+    replace_members(edit.members);
+}
+void MaterialDocument::make_material_unique(std::size_t donor, const std::string &name,
+                                            const std::set<int> &draws) {
+    auto snapshot = preview_model();
+    ResourceEdit edit{snapshot, compiled_members()};
+    auto link = model_link(snapshot);
+    auto source_name = snapshot.scene->materials.at(donor).name;
+    MaterialFaces faces;
+    for (auto draw : draws) {
+        require(draw >= 0 && std::size_t(draw) < snapshot.scene->draws.size(),
+                "Selected mesh no longer exists");
+        auto &mesh = snapshot.scene->draws[draw];
+        if (mesh.material != donor)
+            continue;
+        auto native =
+            snapshot.native_meshes.empty() ? std::size_t(draw) : snapshot.native_meshes.at(draw);
+        for (std::size_t i = 0; i < mesh.indices.size() / 3; ++i)
+            faces[native].insert(i);
+    }
+    require(!faces.empty(), "Select meshes using this material first");
+    auto bytes = copy_model_material(edit.read(link), donor, name);
+    bytes = assign_face_material(bytes, faces, name).bytes;
+    edit.write(link, bytes);
+    std::set<std::size_t> resources;
+    for (auto &motion : snapshot.motions)
+        if (motion.error.empty())
+            resources.insert(motion.resource);
+    for (auto resource : resources) {
+        auto &motion_link = snapshot.resources.at(resource);
+        auto original = edit.read(motion_link);
+        auto motion = decode_material_motion(original);
+        auto old = motion.tracks;
+        for (auto track : old)
+            if (track.material == source_name) {
+                track.material = name;
+                motion.tracks.push_back(std::move(track));
+            }
+        if (motion.tracks != old)
+            edit.write(motion_link, replace_material_motion(original, motion));
+    }
     replace_members(edit.members);
 }
 void MaterialDocument::remove_material(std::size_t material, std::size_t replacement) {

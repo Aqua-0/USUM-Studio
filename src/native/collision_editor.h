@@ -76,6 +76,7 @@ class CollisionEditor {
     std::shared_ptr<FolderSelection> dialog_ = std::make_shared<FolderSelection>();
     std::future<void> export_;
     int dialog_kind_ = 0;
+    int inspector_page_ = 0;
     unsigned revision_ = 0, area_ = 0;
     bool focus_requested_ = false, active_ = false, loading_ = false, vertices_mode_ = false,
          shared_ = true, snap_ = false, leave_ = false, save_leave_ = false, obj_imported_ = false;

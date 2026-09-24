@@ -4,6 +4,7 @@
 #include "native/material_inspector.h"
 #include "native/folder_picker.h"
 #include "field/placement_document.h"
+#include "field/overworld_document.h"
 #include <functional>
 #include <future>
 #include <imgui.h>
@@ -16,7 +17,19 @@ class PlacementEditor {
     ~PlacementEditor();
     void set_scene(std::shared_ptr<Environment> scene, unsigned area,
                    const std::filesystem::path &dump);
-    void draw(const MaterialSelection &selection, const SpatialPoint *cursor = nullptr);
+    void set_working_scene(std::shared_ptr<Environment> scene, OverworldDocument *document);
+    void refresh_working_transforms();
+    void finish_working_edit() {
+        if (working_) {
+            require(!dragging(), "Finish moving the placement before saving");
+            commit();
+        }
+    }
+    bool uses_working_scene() const {
+        return working_ != nullptr;
+    }
+    void draw(const MaterialSelection &selection, const SpatialPoint *cursor = nullptr,
+              bool show_controls = true);
     void open_patch(const std::filesystem::path &path);
     bool gizmo(const float *view, const float *projection, ImVec2 origin, ImVec2 size,
                bool hovered);
@@ -30,6 +43,11 @@ class PlacementEditor {
 
   private:
     ProjectBinding project_;
+    OverworldDocument *working_ = nullptr;
+    std::vector<PlacementState> committed_;
+    std::vector<float> base_turns_;
+    std::vector<Matrix> synchronized_transforms_;
+    void commit();
     void bind_project();
     void synchronize();
     void save();

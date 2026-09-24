@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <map>
 #include <limits>
 namespace studio {
 namespace {
@@ -13,6 +14,75 @@ void identity(const Model &model) {
         require(std::abs(f32(model.original, model.bounds_offset + 32 + i * 4) -
                          (i % 5 == 0 ? 1.f : 0.f)) < .00001f,
                 "Terrain export requires an identity model transform");
+}
+Bytes authored_vertex_stream(View list) {
+    auto writes = commands(list.subspan(16));
+    std::map<unsigned, std::uint32_t> regs;
+    for (const auto &c : writes)
+        for (unsigned lane = 0; lane < 4; ++lane)
+            if (c.mask & (1u << lane)) {
+                const auto mask = 255u << (8 * lane);
+                regs[c.reg] = (regs[c.reg] & ~mask) | (c.value & mask);
+            }
+    auto formats = std::uint64_t(regs[0x201]) | (std::uint64_t(regs[0x202]) << 32);
+    auto semantics = std::uint64_t(regs[0x2bb]) | (std::uint64_t(regs[0x2bc]) << 32);
+    unsigned total = unsigned(formats >> 60) + 1;
+    require(total <= 12, "Authored mesh has an invalid shader attribute count");
+    for (auto a : vertex_layout(list.subspan(16)).attributes)
+        require(a.semantic <= 6, "Authored rigid mesh contains skinning attributes");
+    std::uint64_t mapping = 0;
+    for (unsigned semantic = 0; semantic < 7; ++semantic) {
+        unsigned index = 0;
+        for (; index < total; ++index)
+            if (((semantics >> (4 * index)) & 15) == semantic)
+                break;
+        if (index == total) {
+            require(total < 12, "Authored mesh has no free shader attribute slot");
+            ++total;
+            semantics =
+                (semantics & ~(15ull << (4 * index))) | (std::uint64_t(semantic) << (4 * index));
+        }
+        const unsigned format = semantic == 3 ? 13 : semantic >= 4 ? 7 : 11;
+        formats = (formats & ~(15ull << (4 * index))) | (std::uint64_t(format) << (4 * index));
+        formats &= ~(1ull << (48 + index));
+        mapping |= std::uint64_t(index) << (4 * semantic);
+    }
+    formats = (formats & ~(15ull << 60)) | (std::uint64_t(total - 1) << 60);
+    std::map<unsigned, std::uint32_t> replacements{
+        {0x201, std::uint32_t(formats)},
+        {0x202, std::uint32_t(formats >> 32)},
+        {0x204, std::uint32_t(mapping)},
+        {0x205, (7u << 28) | (64u << 16)},
+        {0x2bb, std::uint32_t(semantics)},
+        {0x2bc, std::uint32_t(semantics >> 32)},
+        {0x242, (regs[0x242] & ~255u) | (total - 1)},
+        {0x2b9, (regs.contains(0x2b9) ? regs[0x2b9] & ~15u : 0xa0000000u) | (total - 1)}};
+    Bytes result(list.begin(), list.end());
+    std::size_t end = result.size();
+    std::map<unsigned, unsigned> written_masks;
+    for (const auto &c : writes) {
+        if (c.reg == 0x23d) {
+            end = std::min(end, 16 + c.offset);
+            break;
+        }
+        if (auto found = replacements.find(c.reg); found != replacements.end()) {
+            put32(result, 16 + c.offset, found->second);
+            written_masks[c.reg] |= c.mask;
+        }
+    }
+    result.resize(end);
+    auto emit = [&](unsigned reg, std::uint32_t value, unsigned mask) {
+        append32(result, value);
+        append32(result, reg | (mask << 16));
+    };
+    for (auto [reg, value] : replacements)
+        if (written_masks[reg] != 15)
+            emit(reg, value, 15);
+    if (result.size() % 16 == 0)
+        emit(0, 0, 0);
+    emit(0x23d, 1, 15);
+    put32(result, 0, narrow(result.size() - 16));
+    return result;
 }
 Bytes material_copy(View original, const std::string &name, const std::string &base,
                     const std::string &overlay) {
@@ -112,6 +182,8 @@ static Bytes append_meshes(const Model &destination, const std::string &material
     if (preserve_material)
         require(text(slice(original, pos + 8, u32(original, pos + 4))) == material_preset,
                 "Extracted mesh material does not match its source submesh");
+    if (preserve_material)
+        lists[0] = authored_vertex_stream(lists[0]);
     auto layout = vertex_layout(slice(lists[0], 16, lists[0].size() - 16));
     std::set<unsigned> semantics;
     for (const auto &a : layout.attributes) {

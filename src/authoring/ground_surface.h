@@ -77,6 +77,12 @@ GroundSurface transform_ground(const AuthoringGrid &grid, const GroundSurface &g
 std::vector<GroundTexture> load_ground_textures(const std::filesystem::path &dump,
                                                 const Environment &scene,
                                                 std::atomic_bool *cancel = nullptr);
+Bytes ground_texture_resource(const std::filesystem::path &dump, const std::string &key);
+void merge_ground_textures(Environment &destination, std::vector<GroundTexture> &palette,
+                           const Environment &source, const std::vector<GroundTexture> &textures);
+void restore_ground_textures(const std::filesystem::path &dump, Environment &scene,
+                             const GroundSurface &ground, std::vector<GroundTexture> &palette,
+                             std::atomic_bool *cancel = nullptr);
 Environment ground_preview(const Environment &source, const AuthoringGrid &grid,
                            const GroundSurface &ground, const std::vector<GroundTexture> &palette);
 }

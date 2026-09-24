@@ -95,11 +95,37 @@ JointTrack offset_joint_motion(const JointTrack &track, const Joint &joint, unsi
             track.curves[axis + 6].sample(float(frame), fallback) + amount, fallback);
         return result;
     }
+    Vector direction{};
+    direction[axis] = 1;
+    return rotate_joint_motion(track, joint, frame, direction, amount);
+}
+JointTrack scale_joint_motion(const JointTrack &track, const Joint &joint, unsigned frame,
+                              std::array<float, 3> factors) {
+    auto result = track;
+    for (unsigned i = 0; i < 3; ++i) {
+        require(std::isfinite(factors[i]) && factors[i] > 0, "Invalid bone scale");
+        if (factors[i] != 1)
+            key(result.curves[i], frame,
+                track.curves[i].sample(float(frame), joint.scale[i]) * factors[i], joint.scale[i]);
+    }
+    return result;
+}
+JointTrack rotate_joint_motion(const JointTrack &track, const Joint &joint, unsigned frame,
+                               std::array<float, 3> axis, float amount) {
+    require(std::isfinite(amount), "Invalid bone rotation");
+    if (amount == 0)
+        return track;
+    float norm = 0;
+    for (auto v : axis)
+        norm += v * v;
+    require(std::isfinite(norm) && norm > 1e-12f, "Invalid bone rotation axis");
+    auto result = track;
     Vector base = track.axis_angle ? Vector{} : joint.rotation, current = base;
     for (unsigned i = 0; i < 3; ++i)
         current[i] = track.curves[i + 3].sample(float(frame), base[i]);
     Quaternion delta{};
-    delta[axis] = std::sin(amount / 2);
+    for (unsigned i = 0; i < 3; ++i)
+        delta[i] = axis[i] / std::sqrt(norm) * std::sin(amount / 2);
     delta[3] = std::cos(amount / 2);
     auto q = multiply(delta, quaternion(current, track.axis_angle));
     float length = 0;

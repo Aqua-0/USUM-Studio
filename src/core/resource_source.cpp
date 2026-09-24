@@ -1,5 +1,7 @@
+#include "core/filesystem.h"
 #include "core/resource_source.h"
 #include "core/digest.h"
+#include "core/source_inventory.h"
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -34,26 +36,37 @@ void relative_path(const std::filesystem::path &path) {
 void validate_original(const std::filesystem::path &objects, const std::string &identity,
                        const std::filesystem::path &original,
                        const std::filesystem::path &relative) {
-    using Inventory = std::map<std::string, std::pair<std::uintmax_t, long long>>;
+    struct ExpectedFile {
+        std::uintmax_t size;
+        long long time;
+        std::string hash;
+    };
+    using Inventory = std::map<std::string, ExpectedFile>;
     static std::mutex mutex;
     static std::map<std::filesystem::path, Inventory> cache;
     std::lock_guard lock(mutex);
     valid_hash(identity);
-    auto object = (objects / identity).lexically_normal();
+    auto object = (objects / source_inventory_identity(objects, identity)).lexically_normal();
     auto found = cache.find(object);
     if (found == cache.end()) {
         auto data = resource_object(object);
         std::istringstream in(text(data));
         std::string tag, name;
         unsigned version;
-        require(bool(in >> tag >> version) && tag == "USUM_ORIGINAL" && version == 1,
+        require(bool(in >> tag >> version) && tag == "USUM_ORIGINAL" &&
+                    (version == 1 || version == 2),
                 "Invalid original dump inventory");
         Inventory entries;
         std::uintmax_t size;
         long long time;
         while (in >> std::quoted(name)) {
             require(bool(in >> size >> time), "Incomplete original dump inventory");
-            entries[resource_key(name)] = {size, time};
+            std::string hash;
+            if (version == 2) {
+                require(bool(in >> hash), "Missing original content hash");
+                valid_hash(hash);
+            }
+            entries[resource_key(name)] = {size, time, std::move(hash)};
         }
         require(in.eof(), "Malformed original dump inventory");
         found = cache.emplace(object, std::move(entries)).first;
@@ -62,11 +75,7 @@ void validate_original(const std::filesystem::path &objects, const std::string &
     if (file == found->second.end())
         return;
     auto path = original / relative;
-    require(std::filesystem::is_regular_file(path) &&
-                std::filesystem::file_size(path) == file->second.first &&
-                std::filesystem::last_write_time(path).time_since_epoch().count() ==
-                    file->second.second,
-            "Original resource changed: " + relative.generic_string());
+    verify_source_content(path, file->second.size, file->second.time, file->second.hash);
 }
 ResourceSource reference(const std::filesystem::path &path) {
     std::ifstream in(path);
@@ -76,13 +85,13 @@ ResourceSource reference(const std::filesystem::path &path) {
     require(bool(in >> tag >> version >> std::quoted(original)) && tag == "USUM_ARCHIVE" &&
                 version == 1,
             "Invalid staged archive reference");
-    result.original = std::filesystem::u8path(original);
+    result.original = path_from_utf8(original);
     std::size_t member;
     unsigned sub;
     while (in >> member) {
         require(bool(in >> sub >> std::quoted(object)) && sub < 32,
                 "Invalid staged member reference");
-        auto p = std::filesystem::u8path(object);
+        auto p = path_from_utf8(object);
         valid_hash(p.filename().string());
         require(result.members.emplace(std::pair{member, sub}, p).second,
                 "Duplicate staged member");
@@ -115,19 +124,19 @@ ResourceSource resource_source(const std::filesystem::path &path) {
                     "Invalid project source descriptor");
             auto relative = absolute.lexically_relative(directory);
             relative_path(relative);
-            validate_original(directory / std::filesystem::u8path(objects), identity,
-                              std::filesystem::u8path(original), relative);
-            ResourceSource result{std::filesystem::u8path(original) / relative, {}};
+            validate_original(directory / path_from_utf8(objects), identity,
+                              path_from_utf8(original), relative);
+            ResourceSource result{path_from_utf8(original) / relative, {}};
             int member, sub;
             while (in >> std::quoted(name)) {
                 require(bool(in >> member >> sub >> hash) && member >= -1 && sub >= 0 && sub < 32,
                         "Invalid project source member");
-                relative_path(std::filesystem::u8path(name));
+                relative_path(path_from_utf8(name));
                 valid_hash(hash);
                 if (resource_key(name) != resource_key(relative.generic_string()))
                     continue;
                 auto object =
-                    (directory / std::filesystem::u8path(objects) / hash).lexically_normal();
+                    (directory / path_from_utf8(objects) / hash).lexically_normal();
                 if (member < 0)
                     result.original = object;
                 else
@@ -153,6 +162,15 @@ std::filesystem::path resource_file_path(const std::filesystem::path &path) {
     if (source.original != path && source.original.parent_path().filename() == "objects")
         resource_object(source.original);
     return source.original;
+}
+std::filesystem::path executable_resource_path(const std::filesystem::path &dump) {
+    for (auto folder : {"exefs", "ExeFS", "ExeFs"})
+        for (auto name : {"code.bin", ".code.bin"}) {
+            auto path = dump / folder / name;
+            if (resource_exists(path))
+                return path;
+        }
+    throw std::runtime_error("Cannot find ExeFS code.bin or .code.bin in " + dump.string());
 }
 bool resource_exists(const std::filesystem::path &path) {
     return std::filesystem::is_regular_file(resource_source(path).original);

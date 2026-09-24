@@ -6,7 +6,7 @@
 #include <cmath>
 #include <cstdio>
 namespace studio {
-void MapCursor::draw(const Environment *scene, ViewportCamera &camera) {
+void MapCursor::draw(const Environment *scene, ViewportCamera &camera, bool show_launcher) {
     if (scene_ != scene) {
         scene_ = scene;
         enabled_ = placing_ = blocked_ = false;
@@ -15,14 +15,16 @@ void MapCursor::draw(const Environment *scene, ViewportCamera &camera) {
         position_ = camera.target;
         message_.clear();
     }
-    ImGui::Begin("Spatial");
-    if (studio::TutorialWidgets::Checkbox("map_cursor", "3D cursor and ruler", &enabled_)) {
-        placing_ = false;
-        if (axis_ >= 0)
-            position_ = drag_start_;
-        axis_ = -1;
+    if (show_launcher) {
+        ImGui::Begin("Map browser");
+        if (studio::TutorialWidgets::Checkbox("map_cursor", "3D cursor and ruler", &enabled_)) {
+            placing_ = false;
+            if (axis_ >= 0)
+                position_ = drag_start_;
+            axis_ = -1;
+        }
+        ImGui::End();
     }
-    ImGui::End();
     if (!enabled_)
         return;
     ImGui::SetNextWindowSize({420, 330}, ImGuiCond_FirstUseEver);

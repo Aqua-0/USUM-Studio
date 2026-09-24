@@ -40,5 +40,11 @@
     "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-devel-3.4.16-VC.zip",
     "sha256": "1a784cb2a5c64d56fe7a62090fe9d242d9865f235e4ea9678f1a6ba4e693e7de",
     "destination": "SDL3-3.4.16"
+  },
+  {
+    "file": "gf-pawncc.tgz",
+    "url": "https://codeload.github.com/SciresM/gf-pawncc/tar.gz/54c45cbd56bdfc433aa3039efd45067e1c472cfe",
+    "sha256": "63589cc48f787583077027159c6986ba2cd574aa3bc470bf3c3e37dca502e709",
+    "destination": "pawn-compiler"
   }
 ]

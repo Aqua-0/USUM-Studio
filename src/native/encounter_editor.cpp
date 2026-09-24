@@ -151,16 +151,19 @@ void EncounterEditor::synchronize() {
     }
 }
 void EncounterEditor::draw(bool loading, ViewportCamera &camera,
-                           const std::function<void()> &stage_reload, const SpatialPoint *cursor) {
+                           const std::function<void()> &stage_reload, const SpatialPoint *cursor,
+                           bool show_launcher) {
     loading_ = loading;
-    ImGui::Begin("Map editing");
-    if (studio::TutorialWidgets::Button("encounter_editor", "Wild encounters", ImVec2(-1, 0))) {
-        open_ = true;
-        ImGui::SetNextWindowFocus();
-        renderer_.spatial.enabled[unsigned(SpatialKind::Encounter)] = true;
-        renderer_.spatial.pick_overlays = true;
+    if (show_launcher) {
+        ImGui::Begin("Map inspector");
+        if (studio::TutorialWidgets::Button("encounter_editor", "Wild encounters", ImVec2(-1, 0))) {
+            open_ = true;
+            ImGui::SetNextWindowFocus();
+            renderer_.spatial.enabled[unsigned(SpatialKind::Encounter)] = true;
+            renderer_.spatial.pick_overlays = true;
+        }
+        ImGui::End();
     }
-    ImGui::End();
     if (!open_)
         return;
     ImGui::SetNextWindowSize({720, 820}, ImGuiCond_FirstUseEver);
@@ -325,21 +328,20 @@ void EncounterEditor::draw(bool loading, ViewportCamera &camera,
                         ImGui::TextUnformatted(shape_draft_.type
                                                    ? "Box (position is bottom center)"
                                                    : "Cylinder (position is bottom center)");
-                        if (studio::TutorialWidgets::RadioButton("encounter_editor", "Move",
+                        if (studio::TutorialWidgets::RadioButton("encounter_editor", "Move (G)",
                                                                  mode_ == 0))
                             mode_ = 0;
                         ImGui::SameLine();
                         ImGui::BeginDisabled(!shape_draft_.type);
-                        if (studio::TutorialWidgets::RadioButton("encounter_editor", "Rotate",
+                        if (studio::TutorialWidgets::RadioButton("encounter_editor", "Rotate (R)",
                                                                  mode_ == 1))
                             mode_ = 1;
                         ImGui::EndDisabled();
                         ImGui::SameLine();
-                        if (studio::TutorialWidgets::RadioButton("encounter_editor", "Resize",
+                        if (studio::TutorialWidgets::RadioButton("encounter_editor", "Scale (S)",
                                                                  mode_ == 2))
                             mode_ = 2;
-                        ImGui::TextDisabled(
-                            "Drag viewport handles; Esc cancels. Shift-drag orbits.");
+                        ImGui::TextDisabled("Ctrl: snap | Esc: cancel");
                         bool apply = false;
                         if (cursor && studio::TutorialWidgets::Button("encounter_editor",
                                                                       "Move to 3D cursor")) {
@@ -352,7 +354,9 @@ void EncounterEditor::draw(bool loading, ViewportCamera &camera,
                             ImGui::InputFloat3("Width / height / depth", shape_draft_.size.data());
                             apply |= ImGui::IsItemDeactivatedAfterEdit();
                         } else {
-                            ImGui::InputFloat("Diameter", &shape_draft_.size[0]);
+                            float radius = shape_draft_.size[0] * .5f;
+                            if (ImGui::InputFloat("Radius", &radius))
+                                shape_draft_.size[0] = radius * 2;
                             apply |= ImGui::IsItemDeactivatedAfterEdit();
                             ImGui::InputFloat("Height", &shape_draft_.size[1]);
                             apply |= ImGui::IsItemDeactivatedAfterEdit();
@@ -490,8 +494,7 @@ void EncounterEditor::draw(bool loading, ViewportCamera &camera,
             ImGui::EndTabBar();
         }
         ImGui::Separator();
-        ImGui::TextDisabled(
-            "Shape edits apply immediately. Apply table and ground-type edits before saving.");
+        ImGui::TextDisabled("Shapes apply immediately. Apply table changes before saving.");
         ImGui::BeginDisabled(!document_->can_undo());
         if (studio::TutorialWidgets::Button("encounter_editor", "Undo")) {
             document_->undo();
@@ -641,7 +644,7 @@ bool EncounterEditor::gizmo(const float *view, const float *projection, ImVec2 o
                 nearest = d;
                 hot = int(axis);
             }
-            auto color = drag_axis_ == int(axis) ? IM_COL32(255, 255, 255, 255) : colors[axis];
+            auto color = drag_axis_ == int(axis) ? IM_COL32(255, 225, 110, 255) : colors[axis];
             draw->AddLine(center, handle, color, 2);
             if (mode_ == 2)
                 draw->AddRectFilled({handle.x - 6, handle.y - 6}, {handle.x + 6, handle.y + 6},
@@ -682,6 +685,15 @@ bool EncounterEditor::gizmo(const float *view, const float *projection, ImVec2 o
     }
     draw->AddCircleFilled(center, 4, IM_COL32(255, 255, 255, 255));
     draw->PopClipRect();
+    if (hovered && drag_axis_ < 0 && !io.WantTextInput && !io.KeyCtrl &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_G))
+            mode_ = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_R) && shape.type)
+            mode_ = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_S))
+            mode_ = 2;
+    }
     auto ring_angle = [&] {
         ImVec2 c, x, z;
         auto p = drag_axis_ >= 0 ? drag_start_.position : shape.position, q = p, r = p;
@@ -721,6 +733,8 @@ bool EncounterEditor::gizmo(const float *view, const float *projection, ImVec2 o
                 float delta = ((io.MousePos.x - mouse_start_.x) * axis_screen_.x +
                                (io.MousePos.y - mouse_start_.y) * axis_screen_.y) *
                               handle_length_ / std::max(square, .01f);
+                if (io.KeyCtrl)
+                    delta = std::round(delta);
                 if (mode_ == 0)
                     next.position[drag_axis_] += delta;
                 else {
@@ -731,12 +745,14 @@ bool EncounterEditor::gizmo(const float *view, const float *projection, ImVec2 o
                 }
             } else {
                 float angle = std::remainder(ring_angle() - angle_start_, 6.283185307f);
+                if (io.KeyCtrl)
+                    angle = std::round(angle / .261799388f) * .261799388f;
                 auto q = next.rotation;
                 float s = std::sin(angle * .5f), c = std::cos(angle * .5f);
                 next.rotation = {c * q[0] + s * q[2], c * q[1] + s * q[3], c * q[2] - s * q[0],
                                  c * q[3] - s * q[1]};
             }
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape) || io.AppFocusLost) {
                 cancel();
                 shape_draft_ = document_->shape(unsigned(selected_), unsigned(shape_index_));
             } else {

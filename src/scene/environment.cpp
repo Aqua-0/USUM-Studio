@@ -1,3 +1,5 @@
+#include "field/field_systems.h"
+#include "field/placement_document.h"
 #include "scene/environment.h"
 #include "field/encounter_document.h"
 #include "scene/model_decoder.h"
@@ -14,7 +16,8 @@
 #include <sstream>
 namespace studio {
 Environment load_environment(const std::filesystem::path &dump, std::size_t area,
-                             std::atomic_bool *cancel, const ArchiveSources &archives) {
+                             std::atomic_bool *cancel, const ArchiveSources &archives,
+                             const std::map<std::size_t, Bytes> &working_members) {
     auto start = std::chrono::steady_clock::now();
     ModelDecoder l{{}, cancel};
     l.out.archive_sources = archives;
@@ -26,7 +29,9 @@ Environment load_environment(const std::filesystem::path &dump, std::size_t area
            archives.resolve(dump, TargetProfile::terrain_archive).string());
     auto member = [&](std::size_t slot) {
         l.checkpoint();
-        auto b = field.decoded(area * TargetProfile::area_stride + slot);
+        auto index = area * TargetProfile::area_stride + slot;
+        auto working = working_members.find(index);
+        auto b = working == working_members.end() ? field.decoded(index) : working->second;
         l.out.source_bytes += b.size();
         return b;
     };
@@ -78,12 +83,12 @@ Environment load_environment(const std::filesystem::path &dump, std::size_t area
     try {
         Archive zones(dump / TargetProfile::zone_archive),
             worlds(dump / TargetProfile::world_archive);
-        auto table = zones.decoded(0), mapping = zones.decoded(1);
+        auto mapping = zones.decoded(1);
         std::map<unsigned, std::map<unsigned, int>> bindings;
         for (auto &location : l.out.locations)
             if (location.zone >= 0) {
-                auto z = slice(table, std::size_t(location.zone) * 84, 84);
-                bindings[u16(mapping, std::size_t(location.zone) * 2)][u16(z, 10)] = location.zone;
+                bindings[u16(mapping, std::size_t(location.zone) * 2)][unsigned(location.zone)] =
+                    location.zone;
             }
         for (auto &[world, ids] : bindings)
             decode_zone_regions(l.out.spatial, worlds.decoded(world), unsigned(area), ids);
@@ -235,14 +240,10 @@ Environment load_environment(const std::filesystem::path &dump, std::size_t area
     auto placements = Container::parse(l.out.placement_source, "ED");
     auto zones = Container::parse(placements.files.at(TargetProfile::static_pack), "ES");
     try {
-        std::map<unsigned, int> ids;
-        Archive archive(dump / TargetProfile::zone_archive);
-        auto table = archive.decoded(0);
-        for (auto &location : l.out.locations)
-            if (location.zone >= 0)
-                ids[u16(table, std::size_t(location.zone) * 84 + 10)] = location.zone;
+        auto ids = load_area_zone_ids(dump, unsigned(area));
         decode_overworld_regions(l.out.spatial, l.out.placement_source, ids);
         decode_encounter_regions(l.out.spatial, l.out.placement_source, ids);
+        decode_field_system_regions(l.out.spatial, l.out.placement_source, ids);
     } catch (const std::exception &e) {
         l.note("Overworld overlays: " + std::string(e.what()));
     }
@@ -309,6 +310,25 @@ Environment load_environment(const std::filesystem::path &dump, std::size_t area
                 l.out.draws[i].placement = placement_id;
         }
     l.source.reset();
+    const PlacementDocument placement_bindings(area, l.out.placement_source);
+    std::map<std::tuple<unsigned, std::size_t, std::size_t>, int> npc_placements;
+    for (std::size_t i = 0; i < placement_bindings.entries().size(); ++i) {
+        const auto &entry = placement_bindings.entries()[i];
+        if (entry.character)
+            npc_placements[{entry.trainer ? TargetProfile::trainer_placement_pack
+                                          : TargetProfile::character_placement_pack,
+                            entry.zone, entry.row}] = int(i);
+    }
+    l.out.placement_transforms.resize(placement_bindings.entries().size(), pose_identity());
+    for (auto &region : l.out.spatial.regions)
+        if (region.overworld &&
+            (region.overworld->category == TargetProfile::character_placement_pack ||
+             region.overworld->category == TargetProfile::trainer_placement_pack)) {
+            auto found = npc_placements.find(
+                {region.overworld->category, region.overworld->local_zone, region.overworld->row});
+            if (found != npc_placements.end())
+                region.placement = found->second;
+        }
     try {
         std::map<unsigned, Container> characters;
         std::map<unsigned, SceneModelSource> character_sources;
@@ -421,6 +441,10 @@ Environment load_environment(const std::filesystem::path &dump, std::size_t area
                         l.source.reset();
                         for (auto draw = first; draw < l.out.draws.size(); ++draw) {
                             l.out.draws[draw].character = true;
+                            if (pack_index == TargetProfile::character_placement_pack ||
+                                pack_index == TargetProfile::trainer_placement_pack)
+                                l.out.draws[draw].placement =
+                                    npc_placements.at({pack_index, zone, index});
                             l.out.draws[draw].conditional =
                                 u32(data, p + 36) != 0 || u32(data, p + 32) != 0;
                         }
@@ -533,7 +557,7 @@ Environment load_environment(const std::filesystem::path &dump, std::size_t area
             return m.combiner.lighting;
         }))
         l.note("Game lighting uses authored environment lights, daily curves and reflection lookup "
-               "tables. Lighting transitions, distribution/Fresnel tables and "
+               "tables. Weather scheduling, transitions, distribution/Fresnel tables and "
                "tangent-map lighting are not yet reproduced.");
     l.note("Material preview: six-stage texture combiners, constants and three UV texture inputs. "
            "UV, constant-color and texture-pattern animation are supported. Native vertex programs "

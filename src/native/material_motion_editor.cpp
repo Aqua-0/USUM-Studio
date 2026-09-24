@@ -1,5 +1,9 @@
+#include "native/motion_graph.h"
 #include "native/tutorial_widgets.h"
 #include "native/material_motion_editor.h"
+#include "assets/material_motion.h"
+#include "native/imgui_renderer.h"
+#include "native/texture_uv_preview.h"
 #include <imgui.h>
 #include <algorithm>
 #include <cmath>
@@ -150,6 +154,121 @@ void MaterialMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
             slope_ = key.slope;
         }
     };
+    if (ImGui::Button("Animate mapping..."))
+        mapping_request_ = true;
+    ImGui::BeginDisabled(daily || preview.scene->materials.empty());
+    if (ImGui::Button("Atlas flipbook...")) {
+        material_ = std::clamp(material_, 0, int(preview.scene->materials.size()) - 1);
+        slot_ = std::clamp(slot_, 0, 2);
+        for (const auto &track : motion.tracks)
+            if (label(track) == track_) {
+                for (unsigned i = 0; i < preview.scene->materials.size(); ++i)
+                    if (preview.scene->materials[i].name == track.material)
+                        material_ = int(i);
+                if (track.kind != MaterialTrack::Kind::ConstantColor)
+                    slot_ = int(track.slot);
+            }
+        error_.clear();
+        ImGui::OpenPopup("Atlas flipbook");
+    }
+    ImGui::EndDisabled();
+    if (daily && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Choose a non-daily motion for a timed flipbook.");
+    std::optional<MaterialMotion> generated;
+    if (ImGui::BeginPopup("Atlas flipbook")) {
+        if (preview.scene->materials.empty() || daily) {
+            ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+            return;
+        }
+        ImGui::TextWrapped("Animate tiles left to right, then down. Tile 1 is the top-left cell.");
+        material_ = std::clamp(material_, 0, int(preview.scene->materials.size()) - 1);
+        if (ImGui::BeginCombo("Material", preview.scene->materials[material_].name.c_str())) {
+            for (unsigned i = 0; i < preview.scene->materials.size(); ++i)
+                if (ImGui::Selectable(preview.scene->materials[i].name.c_str(),
+                                      material_ == int(i)))
+                    material_ = int(i);
+            ImGui::EndCombo();
+        }
+        ImGui::SliderInt("Texture unit", &slot_, 0, 2);
+        ImGui::InputInt("Columns", &atlas_columns_);
+        ImGui::InputInt("Rows", &atlas_rows_);
+        ImGui::InputInt("First tile", &atlas_first_);
+        ImGui::InputInt("Tile count", &atlas_count_);
+        ImGui::InputInt("Frames per tile", &atlas_hold_);
+        ImGui::Checkbox("Repeat through motion", &atlas_repeat_);
+        ImGui::Checkbox("UVs already cover the top-left cell", &atlas_tile_uvs_);
+        ImGui::TextWrapped(
+            atlas_tile_uvs_
+                ? "Keeps UV scale at 1. Each plane must map to the top-left cell."
+                : "Scales full-texture UVs into one cell. Each plane must use UVs from 0 to 1.");
+        const auto &material = preview.scene->materials[material_];
+        const auto &name = material.texture_inputs[slot_];
+        const auto image = preview.scene->textures.find(name);
+        bool valid = image != preview.scene->textures.end() && material.inputs[slot_].source <= 2 &&
+                     atlas_columns_ > 0 && atlas_rows_ > 0 && atlas_first_ > 0 &&
+                     atlas_count_ > 0 && atlas_hold_ > 0;
+        if (valid)
+            valid = atlas_columns_ <= image->second.width && atlas_rows_ <= image->second.height &&
+                    image->second.width % atlas_columns_ == 0 &&
+                    image->second.height % atlas_rows_ == 0 &&
+                    std::int64_t(atlas_first_) - 1 + atlas_count_ <=
+                        std::int64_t(atlas_columns_) * atlas_rows_;
+        if (image != preview.scene->textures.end()) {
+            auto texture = renderer.texture(name);
+            if (bgfx::isValid(texture)) {
+                float scale = 192.f / std::max(image->second.width, image->second.height);
+                ImVec2 size{image->second.width * scale, image->second.height * scale};
+                auto origin = ImGui::GetCursorScreenPos();
+                draw_texture_checkerboard(origin, size);
+                ImGui::Image(ImTextureID(ImGuiRenderer::image_id(texture, true)), size);
+                if (valid) {
+                    int cell = atlas_first_ - 1;
+                    ImVec2 a{origin.x + size.x * (cell % atlas_columns_) / atlas_columns_,
+                             origin.y + size.y * (cell / atlas_columns_) / atlas_rows_};
+                    ImGui::GetWindowDrawList()->AddRect(
+                        a, {a.x + size.x / atlas_columns_, a.y + size.y / atlas_rows_},
+                        IM_COL32(255, 200, 80, 255), 0, 0, 2);
+                    ImGui::Text("%d x %d pixels per tile", image->second.width / atlas_columns_,
+                                image->second.height / atlas_rows_);
+                }
+            }
+        }
+        if (valid) {
+            ImGui::Text("%.3f seconds per cycle | %u-frame motion",
+                        double(atlas_count_) * atlas_hold_ / 30, unsigned(motion.frames));
+            ImGui::TextWrapped("Replaces UV and texture-switch tracks on this material/unit. Other "
+                               "tracks and motion length stay intact.");
+        } else
+            ImGui::TextWrapped(
+                "Choose a bound UV texture, an evenly divided grid, and a tile range inside it.");
+        ImGui::BeginDisabled(!valid);
+        if (ImGui::Button("Generate flipbook")) {
+            try {
+                generated =
+                    make_atlas_flipbook(motion, material.name, unsigned(slot_),
+                                        {unsigned(atlas_columns_), unsigned(atlas_rows_),
+                                         unsigned(atlas_first_ - 1), unsigned(atlas_count_),
+                                         unsigned(atlas_hold_), atlas_repeat_, atlas_tile_uvs_});
+                select_channel(generated->tracks.back(), 3);
+                ImGui::CloseCurrentPopup();
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+        }
+        ImGui::EndDisabled();
+        if (!error_.empty())
+            ImGui::TextWrapped("%s", error_.c_str());
+        ImGui::EndPopup();
+    }
+    if (generated) {
+        apply(*generated);
+        if (error_.empty()) {
+            motion = std::move(*generated);
+            playing = true;
+            renderer.playback.seconds = 0;
+        }
+    }
     ImGui::SeparatorText("Keyed channels");
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##motion-search", "Search materials or channels", filter_,
@@ -296,6 +415,36 @@ void MaterialMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                 ImGui::EndCombo();
             }
         }
+        std::vector<MotionGraphKey> graph_keys;
+        if (pattern) {
+            for (unsigned i = 0; i < t.textures.size(); ++i)
+                graph_keys.push_back({float(t.textures[i].frame), float(i)});
+        } else
+            for (auto &key : t.curves[channel_].keys)
+                graph_keys.push_back({key.frame, key.value});
+        auto graph = motion_graph(
+            "Material motion timeline", motion.frames, float(frame), graph_keys,
+            [&](float at) {
+                if (!pattern)
+                    return t.curves[channel_].sample(at, 0);
+                float value = 0;
+                for (unsigned i = 0; i < t.textures.size(); ++i)
+                    if (t.textures[i].frame <= at)
+                        value = float(i);
+                return value;
+            },
+            graph_expanded_, pattern);
+        if (graph.frame >= 0)
+            scrub(graph.frame);
+        if (graph.key >= 0) {
+            key_frame_ = int(graph_keys[graph.key].frame);
+            if (pattern)
+                texture_ = t.textures[graph.key].texture;
+            else {
+                value_ = t.curves[channel_].keys[graph.key].value;
+                slope_ = t.curves[channel_].keys[graph.key].slope;
+            }
+        }
         ImGui::BeginChild("Motion keys", {0, 100}, ImGuiChildFlags_Borders);
         if (pattern) {
             for (auto &k : t.textures) {
@@ -346,16 +495,11 @@ void MaterialMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
             ImGui::InputFloat("Slope", &slope_, 0, 0, "%.5f");
             ImGui::TextWrapped(
                 "Slope: change per frame. One key is constant; no keys use the base material.");
-            auto &curve = t.curves[channel_];
-            float points[128];
-            for (unsigned i = 0; i < 128; ++i)
-                points[i] = curve.sample(motion.frames * i / 127, 0);
-            ImGui::PlotLines("##curve", points, 128, 0, nullptr, FLT_MAX, FLT_MAX, {-1, 45});
         }
         bool valid =
             key_frame_ >= 0 && key_frame_ <= motion.frames && (!pattern || !texture_.empty());
         ImGui::BeginDisabled(!valid);
-        if (studio::TutorialWidgets::Button("material_motion_editor", "Set key")) {
+        if (studio::TutorialWidgets::Button("material_motion_editor", "Insert key")) {
             auto next = motion;
             auto &target = next.tracks[track_index];
             if (pattern) {

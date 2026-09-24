@@ -1,4 +1,5 @@
 #include "field/interaction.h"
+#include "field/interaction_source.h"
 #include "field/area.h"
 #include "field/map_catalog.h"
 #include "formats/archive.h"
@@ -35,7 +36,19 @@ std::string value_text(Value v) {
     return v ? (v.local ? "local address" : std::to_string(*v)) : "runtime value";
 }
 std::string native_name(unsigned hash) {
-    static const char *names[] = {"VoicePlay_",
+    static const char *names[] = {"TrainerIDGet",
+                                  "TrainerGetScrID",
+                                  "TrainerGetEventID",
+                                  "CallTrainerBattleCore",
+                                  "BattleGetResult_",
+                                  "FlagGet",
+                                  "FlagSet",
+                                  "FlagReset",
+                                  "ZigarudeCellStatusSet",
+                                  "RecordAdd",
+                                  "MEPlay",
+                                  "WordSetNumber",
+                                  "VoicePlay_",
                                   "ExtraMsgInstant_",
                                   "ChrMotionCommandInit_",
                                   "ChrMotionCommandEntry_",
@@ -73,7 +86,8 @@ std::string native_name(unsigned hash) {
                                   "ChrResetLookAt_",
                                   "GetTargetActorEventId",
                                   "LastKeyWait_",
-                                  "GlobalCall"};
+                                  "GlobalCall",
+                                  "_Suspend"};
     for (auto name : names)
         if (pawn_name_hash(name) == hash)
             return name;
@@ -94,15 +108,18 @@ unsigned switch_target(const AmxProgram &p, unsigned address, std::int32_t value
     for (unsigned k = 0; k < unsigned(args[0]); ++k)
         if (args[2 + 2 * k] == value)
             return relative_target(address + (3 + 2 * k) * 4, args[3 + 2 * k]);
-    require(!require_case, "This script ID has no zone-local dispatcher case. Common-script "
-                           "resolution is not supported yet.");
+    require(!require_case, "This script ID has no dispatcher case in the resolved program.");
     return relative_target(address + 4, args[1]);
 }
+}
+std::string interaction_native_name(unsigned hash) {
+    return native_name(hash);
 }
 InteractionInspection
 trace_interaction(const AmxProgram &p, unsigned script, unsigned event,
                   const std::vector<std::string> &messages,
-                  const std::function<std::vector<std::string>(bool, unsigned)> &load_messages) {
+                  const std::function<std::vector<std::string>(bool, unsigned)> &load_messages,
+                  const std::string &message_source) {
     InteractionInspection out;
     out.listing = p.listing();
     auto variable = p.variables.find(pawn_name_hash("g_mode"));
@@ -116,15 +133,25 @@ trace_interaction(const AmxProgram &p, unsigned script, unsigned event,
                 unsigned(it->second.operands[0]) == variable->second,
             "Unrecognized interaction dispatcher load");
     it = p.instructions.find(it->second.next);
-    require(it != p.instructions.end() && it->second.name == "switch",
-            "Unrecognized interaction dispatcher switch");
-    out.entry = switch_target(p, relative_target(it->first, it->second.operands[0]),
-                              std::int32_t(script), true);
+    require(it != p.instructions.end(), "Missing interaction dispatcher");
+    if (it->second.name == "switch")
+        out.entry = switch_target(p, relative_target(it->first, it->second.operands[0]),
+                                  std::int32_t(script), true);
+    else if (it->second.name == "eq.c.pri" || it->second.name == "eq.p.c.pri") {
+        const bool equal = it->second.operands.at(0) == std::int32_t(script);
+        it = p.instructions.find(it->second.next);
+        require(it != p.instructions.end() &&
+                    (it->second.name == "jzer" || it->second.name == "jnz"),
+                "Unrecognized interaction comparison branch");
+        const bool taken = it->second.name == "jzer" ? !equal : equal;
+        out.entry = taken ? relative_target(it->first, it->second.operands.at(0)) : it->second.next;
+    } else
+        throw std::runtime_error("Unrecognized interaction dispatcher");
     std::set<unsigned> active;
     unsigned steps = 0;
     bool partial = false, message_context = true, context_uncertain = false;
     auto current_messages = messages;
-    std::string current_message_source = "Zone message table";
+    std::string current_message_source = message_source;
     auto add = [&](unsigned address, std::string title, std::string detail,
                    bool recognized = false) {
         require(out.actions.size() < 512, "Interaction exceeds inspection action limit");
@@ -249,6 +276,9 @@ trace_interaction(const AmxProgram &p, unsigned script, unsigned event,
                 pri = 0;
             else if (op == "zero.alt")
                 alt = 0;
+            else if (op == "push" || op == "push.p")
+                push(unsigned(operand()) == variable->second ? Value(std::int32_t(script))
+                                                             : Value{});
             else if (op == "load.s.pri" || op == "load.p.s.pri")
                 pri = get(operand());
             else if (op == "load.s.alt" || op == "load.p.s.alt")
@@ -364,8 +394,14 @@ trace_interaction(const AmxProgram &p, unsigned script, unsigned event,
                             detail << "\nMessage text could not be resolved in the current context "
                                       "(including loaded message buffers).";
                         current_messages = messages;
-                        current_message_source = "Zone message table";
+                        current_message_source = message_source;
                         message_context = true;
+                    } else if (name == "FlagGet" || name == "FlagSet" || name == "FlagReset") {
+                        title = std::string(name == "FlagGet"   ? "Read flag "
+                                            : name == "FlagSet" ? "Set flag "
+                                                                : "Clear flag ") +
+                                value_text(arg(0));
+                        known = true;
                     } else if (name == "WorkGet") {
                         title = "Read story variable " + value_text(arg(0));
                         known = true;
@@ -408,7 +444,13 @@ trace_interaction(const AmxProgram &p, unsigned script, unsigned event,
                             partial = true;
                     }
                     add(pc, title, detail.str(), known);
+                    for (const auto &value : values)
+                        out.actions.back().arguments.push_back(
+                            value && !value.local ? std::optional<std::int32_t>(*value)
+                                                  : std::nullopt);
                     pri = name == "GetTargetActorEventId" ? Value(std::int32_t(event)) : Value{};
+                    if (name == "TrainerIDGet" && arg(0) && *arg(0) >= 1000 && *arg(0) < 3000)
+                        pri = *arg(0) - 1000;
                 }
             } else {
                 stop("Instruction " + op + " is not interpreted.");
@@ -428,19 +470,13 @@ InteractionInspection inspect_interaction(const std::filesystem::path &dump,
                                           const ArchiveSources &archives, unsigned area,
                                           unsigned local_zone, int zone, unsigned script,
                                           unsigned event) {
-    require(zone >= 0, "Interaction has no resolved global zone");
-    Archive field(archives.resolve(dump, TargetProfile::field_archive));
-    auto member = std::size_t(area) * TargetProfile::area_stride + TargetProfile::zone_script_slot;
-    auto scripts = Container::parse(field.decoded(member), "ZS");
-    require(local_zone < scripts.files.size(), "Zone script slot is unavailable");
-    auto program = decode_field_amx(scripts.files[local_zone]);
-    Archive zones(dump / TargetProfile::zone_archive);
-    auto table = zones.decoded(0);
-    auto message_member = u16(table, std::size_t(zone) * 84 + 12);
+    auto resolved = resolve_interaction_source(dump, archives, area, local_zone, zone, script);
+    auto program = decode_field_amx(resolved.program);
+    auto message_member = resolved.message_member;
     std::vector<std::string> messages;
     std::string message_notice;
     try {
-        Archive text(dump / TargetProfile::interaction_text_archive);
+        Archive text(dump / resolved.messages);
         messages = decode_location_text(text.decoded(message_member));
     } catch (const std::exception &e) {
         message_notice = " Message preview unavailable: " + std::string(e.what());
@@ -448,18 +484,23 @@ InteractionInspection inspect_interaction(const std::filesystem::path &dump,
     InteractionInspection out;
     try {
         out = trace_interaction(
-            program, script, event, messages, [&](bool script_messages, unsigned selected_member) {
+            program, script, event, messages,
+            [&](bool script_messages, unsigned selected_member) {
                 Archive text(dump / (script_messages ? TargetProfile::interaction_text_archive
                                                      : TargetProfile::location_text_archive));
                 return decode_location_text(text.decoded(selected_member));
-            });
+            },
+            std::string(resolved.shared ? "Shared script" : "Zone") + " message member " +
+                std::to_string(message_member));
     } catch (const std::exception &e) {
         out.listing = program.listing();
         out.notice = std::string("Cannot summarize this interaction: ") + e.what();
     }
     out.message_member = message_member;
-    out.source = "Field member " + std::to_string(member) + " / zone script " +
-                 std::to_string(local_zone) + " / message member " + std::to_string(message_member);
+    out.source = (resolved.shared ? "Shared script member " : "Field member ") +
+                 std::to_string(resolved.member) +
+                 (resolved.shared ? "" : " / zone script " + std::to_string(local_zone)) +
+                 " / message member " + std::to_string(message_member);
     out.notice += message_notice;
     return out;
 }

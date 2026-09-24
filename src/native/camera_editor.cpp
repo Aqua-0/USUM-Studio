@@ -1,3 +1,5 @@
+#include "inspector_selector.h"
+#include "native/viewport_navigation.h"
 #include "native/tutorial_widgets.h"
 #include "native/camera_editor.h"
 #include "formats/archive.h"
@@ -225,14 +227,15 @@ void CameraEditor::draw(bool loading, ViewportCamera &view) {
         }
     }
     ImGui::SameLine();
-    if (studio::TutorialWidgets::Button("camera_editor", "Restart player")) {
+    if (studio::TutorialWidgets::Button("camera_editor", "Restart")) {
         if (auto spawn = scene_->start_position())
             player_started_ = player.start(scene_->spatial, *spawn, -1);
     }
     if (player.active)
         player_started_ = true;
     ImGui::SameLine();
-    studio::TutorialWidgets::Checkbox("camera_editor", "Pause player", &player.paused);
+    if (studio::TutorialWidgets::Button("camera_editor", player.paused ? "Play" : "Pause"))
+        player.paused = !player.paused;
     ImGui::SameLine();
     studio::TutorialWidgets::Checkbox("camera_editor", "Follow active camera", &follow_);
     if (player.active)
@@ -240,7 +243,7 @@ void CameraEditor::draw(bool loading, ViewportCamera &view) {
                     player.camera_setting, player.camera_ratio);
     ImGui::EndDisabled();
     ImGui::End();
-    ImGui::Begin("Camera status");
+    ImGui::Begin("Camera editing");
     ImGui::BeginDisabled(busy);
     try {
         ImGui::BeginDisabled(!document_->can_undo());
@@ -256,38 +259,61 @@ void CameraEditor::draw(bool loading, ViewportCamera &view) {
             synchronize();
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
         if (studio::TutorialWidgets::Button("camera_editor",
                                             project_store() ? "Save Project" : "Save patch"))
             save();
-        ImGui::SameLine();
-        if (!project_store() && studio::TutorialWidgets::Button("camera_editor", "Save as..."))
-            dialog(1);
-        ImGui::SameLine();
-        if (studio::TutorialWidgets::Button("camera_editor", "Open patch..."))
-            request_leave([this] {
-                dialog(2);
-            });
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!document_->changed());
-        if (studio::TutorialWidgets::Button("camera_editor", "Export camera GARC...")) {
-            document_->commit();
-            dialog(3);
+        if (ImGui::CollapsingHeader("Document actions")) {
+            if (!project_store() && studio::TutorialWidgets::Button("camera_editor", "Save as..."))
+                dialog(1);
+            if (studio::TutorialWidgets::Button("camera_editor", "Open patch..."))
+                request_leave([this] {
+                    dialog(2);
+                });
+            ImGui::BeginDisabled(!document_->changed());
+            if (studio::TutorialWidgets::Button("camera_editor", "Export camera GARC...")) {
+                document_->commit();
+                dialog(3);
+            }
+            ImGui::EndDisabled();
         }
-        ImGui::EndDisabled();
     } catch (const std::exception &e) {
         message_ = e.what();
     }
     ImGui::TextUnformatted(document_->dirty() ? "Unsaved camera changes"
-                                              : "Camera patch saved / unchanged");
+                                              : "No unsaved camera changes");
     ImGui::EndDisabled();
     ImGui::End();
     ImGui::Begin("Camera editing");
     ImGui::BeginDisabled(busy);
     const char *categories[] = {"Cameras", "Circles", "Trigger triangles", "Scroll stops",
                                 "Replacement rules"};
-    ImGui::Combo("Edit", &category_, categories, 5);
-    std::set<std::string> groups;
+    InspectorSelectorStyle category_style("Choose camera tool");
+    ImGui::Combo("##camera-tool", &category_, categories, 5);
+    category_style.end();
+    auto natural_less = [](const std::string &a, const std::string &b) {
+        std::size_t i = 0, j = 0;
+        while (i < a.size() && j < b.size()) {
+            if (a[i] >= '0' && a[i] <= '9' && b[j] >= '0' && b[j] <= '9') {
+                auto ai = i, bj = j;
+                while (i < a.size() && a[i] >= '0' && a[i] <= '9')
+                    ++i;
+                while (j < b.size() && b[j] >= '0' && b[j] <= '9')
+                    ++j;
+                if (i - ai != j - bj)
+                    return i - ai < j - bj;
+                auto result = a.compare(ai, i - ai, b, bj, j - bj);
+                if (result)
+                    return result < 0;
+            } else {
+                if (a[i] != b[j])
+                    return a[i] < b[j];
+                ++i;
+                ++j;
+            }
+        }
+        return a.size() < b.size();
+    };
+    std::set<std::string, decltype(natural_less)> groups(natural_less);
     for (auto &f : document_->fields()) {
         bool match = category_ == 0   ? f.group.starts_with("Camera ")
                      : category_ == 1 ? f.group.starts_with("Circle ")
@@ -304,7 +330,8 @@ void CameraEditor::draw(bool loading, ViewportCamera &view) {
                 group_ = group;
     if (!groups.contains(group_))
         group_ = groups.empty() ? "" : *groups.begin();
-    if (ImGui::BeginCombo("Selection", group_.c_str())) {
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##camera-selection", group_.c_str())) {
         for (auto &group : groups)
             if (ImGui::Selectable(group.c_str(), group == group_)) {
                 group_ = group;
@@ -458,10 +485,36 @@ bool CameraEditor::draw_workspace(bool loading) {
     ImGui::SameLine();
     if (studio::TutorialWidgets::Button("camera_editor", "Frame player"))
         view_.focus_start(renderer_.player.position);
-    ImGui::TextWrapped("Player: WASD, Ctrl to run. Free view: middle-drag to orbit, right-drag to "
-                       "pan, wheel to zoom.");
+    if (ImGui::CollapsingHeader("Controls")) {
+        ImGui::TextWrapped("Player: WASD, Ctrl to run.");
+        ImGui::TextWrapped("%s", viewport_navigation_help);
+    }
+    ImGui::SeparatorText("Regions");
     if (scene_) {
-        std::set<std::string> groups;
+        auto natural_less = [](const std::string &a, const std::string &b) {
+            std::size_t i = 0, j = 0;
+            while (i < a.size() && j < b.size()) {
+                if (a[i] >= '0' && a[i] <= '9' && b[j] >= '0' && b[j] <= '9') {
+                    auto ai = i, bj = j;
+                    while (i < a.size() && a[i] >= '0' && a[i] <= '9')
+                        ++i;
+                    while (j < b.size() && b[j] >= '0' && b[j] <= '9')
+                        ++j;
+                    if (i - ai != j - bj)
+                        return i - ai < j - bj;
+                    auto result = a.compare(ai, i - ai, b, bj, j - bj);
+                    if (result)
+                        return result < 0;
+                } else {
+                    if (a[i] != b[j])
+                        return a[i] < b[j];
+                    ++i;
+                    ++j;
+                }
+            }
+            return a.size() < b.size();
+        };
+        std::set<std::string, decltype(natural_less)> groups(natural_less);
         if (document_)
             for (auto &field : document_->fields())
                 groups.insert(field.group);
@@ -486,7 +539,7 @@ bool CameraEditor::draw_workspace(bool loading) {
     }
     auto &io = ImGui::GetIO();
     auto &player = renderer_.player;
-    bool input = hovered_ && !(io.KeyCtrl && io.KeyShift) && !loading && !kind_ &&
+    bool input = hovered_ && !overview_ && !(io.KeyCtrl && io.KeyShift) && !loading && !kind_ &&
                  !export_.valid() && !io.WantTextInput &&
                  (SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS);
     if (player.active) {
@@ -554,19 +607,17 @@ bool CameraEditor::draw_workspace(bool loading) {
                  {1, flip ? 0.f : 1.f});
     hovered_ = ImGui::IsItemHovered();
     if (hovered_ && (!player.active || overview_)) {
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
-            view_.rotate(io.MouseDelta.x, io.MouseDelta.y, false);
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
-            view_.pan(io.MouseDelta.x, io.MouseDelta.y);
-        view_.wheel(io.MouseWheel, false);
+        viewport_navigation(view_, window_, true);
     }
     ImGui::End();
-    ImGui::Begin("Camera status");
+    ImGui::Begin("Camera editing");
     ImGui::TextWrapped("%s", message_.c_str());
-    ImGui::TextWrapped(
-        "Preview supports follow, blended follow, fixed cameras, conditions, replacement rules and "
-        "distance support. Path playback and direction-support behavior remain unverified. Save "
-        "patches to retain edits; export writes a separate field GARC.");
+    if (ImGui::CollapsingHeader("Preview support"))
+        ImGui::TextWrapped("Preview supports follow, blended follow, fixed cameras, conditions, "
+                           "replacement rules and "
+                           "distance support. Path playback and direction-support behavior remain "
+                           "unverified. Save "
+                           "patches to retain edits; export writes a separate field GARC.");
     ImGui::End();
     return maps;
 }

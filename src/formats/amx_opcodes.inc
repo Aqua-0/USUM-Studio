@@ -1,4 +1,4 @@
-// Adapted opcode metadata; see licenses/PAWN_DISASSEMBLY.txt.
+// Adapted opcode metadata; see docs/licenses/PAWN_DISASSEMBLY.txt.
 {"???",0},
 {"load.pri",1},
 {"load.alt",1},

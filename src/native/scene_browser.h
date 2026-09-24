@@ -5,8 +5,11 @@ namespace studio {
 class SceneBrowser {
   public:
     void rebuild(const Environment &scene);
-    void draw(const Environment *scene, const EnvironmentRenderer &renderer,
-              MaterialSelection &selection, ViewportCamera &camera);
+    void draw(const Environment *scene, EnvironmentRenderer &renderer, MaterialSelection &selection,
+              ViewportCamera &camera, bool embedded = false);
+    void frame_selection(const Environment &scene, const EnvironmentRenderer &renderer,
+                         const MaterialSelection &selection, ViewportCamera &camera) const;
+    static int character_region(const Environment &scene, int draw);
 
   private:
     struct Object {

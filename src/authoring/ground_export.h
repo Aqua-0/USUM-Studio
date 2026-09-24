@@ -4,7 +4,7 @@
 namespace studio {
 struct GroundExportResult {
     std::size_t member = 0, triangles = 0;
-    Bytes original, compiled;
+    Bytes original, compiled, background;
 };
 std::vector<CollisionFace> ground_collision_faces(const AuthoringGrid &, const GroundSurface &);
 std::vector<CollisionState> composition_collision(const CompositionDocument &);

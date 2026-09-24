@@ -12,6 +12,10 @@ struct PlacementEntry {
     std::size_t zone = 0, row = 0, offset = 0;
     Placement source;
     std::string restriction;
+    bool character = false, trainer = false;
+    std::size_t patrol = 0;
+    unsigned character_model = 0;
+    std::vector<std::size_t> shapes;
 };
 class PlacementDocument {
   public:

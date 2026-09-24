@@ -35,12 +35,19 @@ Bytes update_pokemon_shadow(View original, View replacement, bool editing_shadow
         validate_pokemon_shadow(after.files[0], after.files[1]);
         return {replacement.begin(), replacement.end()};
     }
+    auto prepared_shadow = SkinnedModel::parse(after.files[1]);
+    if (same_skeleton(body.joints, prepared_shadow.joints)) {
+        validate_pokemon_shadow(after.files[0], after.files[1]);
+        return {replacement.begin(), replacement.end()};
+    }
     auto previous = SkinnedModel::parse(before.files[0]);
     if (same_skeleton(previous.joints, body.joints))
         return {replacement.begin(), replacement.end()};
     validate_pokemon_shadow(before.files[0], before.files[1]);
     auto joints = body.joints;
     auto shadow = SkinnedModel::parse(after.files[1]);
+    require(shadow.joints.size() <= joints.size(),
+            "Import a shadow compatible with the new skeleton");
     for (std::size_t i = 0; i < shadow.joints.size(); ++i)
         joints[i].flags = shadow.joints[i].flags;
     auto updated = replace_skeleton(after.files[1], joints);

@@ -8,6 +8,7 @@ struct InteractionAction {
     unsigned address = 0;
     std::string title, detail;
     bool recognized = false;
+    std::vector<std::optional<std::int32_t>> arguments;
 };
 struct InteractionInspection {
     std::string source, listing, notice;
@@ -18,8 +19,9 @@ InteractionInspection inspect_interaction(const std::filesystem::path &dump,
                                           const ArchiveSources &archives, unsigned area,
                                           unsigned local_zone, int zone, unsigned script,
                                           unsigned event);
-InteractionInspection trace_interaction(
-    const AmxProgram &program, unsigned script, unsigned event,
-    const std::vector<std::string> &messages,
-    const std::function<std::vector<std::string>(bool, unsigned)> &load_messages = {});
+InteractionInspection
+trace_interaction(const AmxProgram &program, unsigned script, unsigned event,
+                  const std::vector<std::string> &messages,
+                  const std::function<std::vector<std::string>(bool, unsigned)> &load_messages = {},
+                  const std::string &message_source = "Zone message table");
 }

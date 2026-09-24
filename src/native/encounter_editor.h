@@ -18,7 +18,7 @@ class EncounterEditor {
     }
     void set_scene(std::shared_ptr<Environment>, unsigned area, const std::filesystem::path &dump);
     void draw(bool loading, ViewportCamera &camera, const std::function<void()> &stage_reload,
-              const SpatialPoint *cursor = nullptr);
+              const SpatialPoint *cursor = nullptr, bool show_launcher = true);
 
   private:
     void synchronize();

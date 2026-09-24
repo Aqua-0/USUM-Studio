@@ -413,14 +413,25 @@ std::string CompositionDocument::serialize() const {
     for (const auto &instance : state_.instances) {
         const auto *asset = project_asset(instance.resource);
         const auto source = asset ? asset->source : instance.resource;
-        if (catalog_.entries.at(source).area != catalog_.area)
+        if (source != ProjectAsset::no_source && catalog_.entries.at(source).area != catalog_.area)
             library_areas.insert(catalog_.entries.at(source).area);
     }
     for (const auto &asset : state_.assets)
-        if (catalog_.entries.at(asset.source).area != catalog_.area)
+        if (asset.source != ProjectAsset::no_source &&
+            catalog_.entries.at(asset.source).area != catalog_.area)
             library_areas.insert(catalog_.entries.at(asset.source).area);
     const unsigned version =
-        !library_areas.empty()   ? 13
+        std::any_of(state_.assets.begin(), state_.assets.end(),
+                    [](const auto &a) {
+                        return a.source == ProjectAsset::no_source;
+                    })
+            ? 15
+        : std::any_of(state_.assets.begin(), state_.assets.end(),
+                      [](const auto &a) {
+                          return !a.native_resource.empty();
+                      })
+            ? 14
+        : !library_areas.empty() ? 13
         : state_.replace_terrain ? 12
         : std::any_of(state_.instances.begin(), state_.instances.end(),
                       [](const auto &i) {
@@ -451,7 +462,9 @@ std::string CompositionDocument::serialize() const {
         out << "library_area " << area << '\n';
     for (const auto &asset : state_.assets) {
         out << "asset " << asset.id << ' ' << std::quoted(asset.name) << ' '
-            << std::quoted(source_key(catalog_.entries.at(asset.source).source));
+            << std::quoted(asset.source == ProjectAsset::no_source
+                               ? std::string{}
+                               : source_key(catalog_.entries.at(asset.source).source));
         for (float value : asset.pivot)
             out << ' ' << value;
         out << ' ' << asset.faces.size();
@@ -461,6 +474,13 @@ std::string CompositionDocument::serialize() const {
                 out << ' ' << face;
         }
         out << '\n';
+        if (!asset.native_resource.empty()) {
+            out << "asset_resource " << asset.id << ' ';
+            constexpr char digits[] = "0123456789abcdef";
+            for (auto b : asset.native_resource)
+                out << digits[b >> 4] << digits[b & 15];
+            out << '\n';
+        }
         if (!asset.meshes.empty()) {
             out << "asset_mesh " << asset.id << ' ' << asset.meshes.size() << '\n';
             for (const auto &mesh : asset.meshes) {
@@ -579,7 +599,7 @@ void CompositionDocument::restore(const std::string &text) {
     unsigned version = 0, area = 0;
     State next;
     require(bool(in >> word >> version) && word == "USUMSTUDIO_COMPOSITION" &&
-                (version >= 1 && version <= 13),
+                (version >= 1 && version <= 15),
             "Unsupported composition document");
     require(bool(in >> word >> area) && word == "area" && area == catalog_.area,
             "Load the composition's template area before opening it");
@@ -719,8 +739,11 @@ void CompositionDocument::restore(const std::string &text) {
                                       [&](const auto &entry) {
                                           return source_key(entry.source) == source;
                                       });
-            require(found != catalog_.entries.end(), "Project asset source is missing or changed");
-            asset.source = std::size_t(found - catalog_.entries.begin());
+            const bool portable = version >= 15 && source.empty();
+            require(portable || found != catalog_.entries.end(),
+                    "Project asset source is missing or changed");
+            asset.source =
+                portable ? ProjectAsset::no_source : std::size_t(found - catalog_.entries.begin());
             asset.faces.resize(sections);
             std::size_t total = 0;
             for (auto &faces : asset.faces) {
@@ -732,9 +755,29 @@ void CompositionDocument::restore(const std::string &text) {
                 for (auto &face : faces)
                     require(bool(in >> face), "Truncated asset faces");
             }
-            validate_project_asset(asset, catalog_);
+            if (!portable)
+                validate_project_asset(asset, catalog_);
             next_asset_id = std::max(next_asset_id, asset.id + 1);
             next.assets.push_back(std::move(asset));
+            continue;
+        }
+        if (word == "asset_resource") {
+            std::size_t id;
+            std::string encoded;
+            require(version >= 14 && bool(in >> id >> encoded) && !next.assets.empty() &&
+                        next.assets.back().id == id && next.assets.back().native_resource.empty() &&
+                        encoded.size() % 2 == 0 && encoded.size() <= 512u * 1024 * 1024,
+                    "Invalid project asset resource block");
+            auto digit = [](char c) -> unsigned {
+                require((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'),
+                        "Invalid asset resource encoding");
+                return c <= '9' ? c - '0' : c - 'a' + 10;
+            };
+            auto &bytes = next.assets.back().native_resource;
+            bytes.reserve(encoded.size() / 2);
+            for (std::size_t i = 0; i < encoded.size(); i += 2)
+                bytes.push_back(std::uint8_t(digit(encoded[i]) * 16 + digit(encoded[i + 1])));
+            project_asset_resource_preview(bytes);
             continue;
         }
         if (word == "asset_mesh") {
@@ -863,6 +906,8 @@ void CompositionDocument::restore(const std::string &text) {
     require(version == 1 || version >= 5 || bool(next.ground),
             "Ground composition is missing its ground surface");
     require(ended && in.eof(), "Composition is truncated or contains unexpected trailing data");
+    for (const auto &asset : next.assets)
+        validate_project_asset(asset, catalog_);
     state_ = std::move(next);
     saved_ = state_;
     history_ = {state_};

@@ -1,3 +1,4 @@
+#include "native/motion_graph.h"
 #include "native/tutorial_widgets.h"
 #include "native/visibility_motion_editor.h"
 #include <imgui.h>
@@ -56,6 +57,26 @@ void VisibilityMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
         track.frames.assign(std::size_t(clock.frames) + 1, true);
     } else
         track = *found;
+    std::vector<MotionGraphKey> graph_keys;
+    for (unsigned i = 0; i < track.frames.size(); ++i)
+        if (!i || track.frames[i] != track.frames[i - 1])
+            graph_keys.push_back({float(i), track.frames[i] ? 1.f : 0.f});
+    auto graph = motion_graph(
+        "Visibility motion timeline", clock.frames, float(frame), graph_keys,
+        [&](float at) {
+            return track.frames.empty()
+                       ? 1.f
+                       : (track.frames[std::min(std::size_t(at), track.frames.size() - 1)] ? 1.f
+                                                                                           : 0.f);
+        },
+        graph_expanded_, true);
+    if (graph.frame >= 0)
+        scrub(graph.frame);
+    if (graph.key >= 0) {
+        start_ = int(graph_keys[graph.key].frame);
+        end_ = graph.key + 1 < int(graph_keys.size()) ? int(graph_keys[graph.key + 1].frame) - 1
+                                                      : int(clock.frames);
+    }
     ImGui::Text("At frame %d: %s", frame, track.frames.at(frame) ? "Shown" : "Hidden");
     if (found == motion.tracks.end())
         ImGui::TextDisabled("No track: mesh is shown by default.");

@@ -13,7 +13,7 @@ class SpatialOverlay {
     }
     void set_scene(std::shared_ptr<const Environment> scene);
     void render(bgfx::ViewId view, bool picking, unsigned first_id);
-    bool controls(ViewportCamera &camera, int zone);
+    bool controls(ViewportCamera &camera, int zone, bool details = false);
     std::array<bool, unsigned(SpatialKind::Count)> enabled{}, locked{};
     int destination_zone = -1;
     unsigned destination_event = 0;
@@ -38,6 +38,7 @@ class SpatialOverlay {
     char search_[128]{};
     bool guides_ = true;
     int kind_filter_ = 0;
+    int interaction_guide_selection_ = -1;
     SpatialPoint anchor_{};
     int anchor_selection_ = -2;
     int zone_ = -1;

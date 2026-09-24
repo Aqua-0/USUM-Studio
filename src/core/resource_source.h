@@ -11,6 +11,7 @@ struct ResourceSource {
 };
 ResourceSource resource_source(const std::filesystem::path &path);
 std::filesystem::path resource_file_path(const std::filesystem::path &path);
+std::filesystem::path executable_resource_path(const std::filesystem::path &dump);
 bool resource_exists(const std::filesystem::path &path);
 bool archive_reference(const std::filesystem::path &path);
 std::shared_ptr<void> pin_resources(const ResourceMembers &members);

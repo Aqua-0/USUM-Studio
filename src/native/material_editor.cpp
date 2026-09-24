@@ -1,9 +1,13 @@
+#include "native/inspector_selector.h"
+#include "assets/overworld_character_asset.h"
+#include "assets/battle_effects.h"
 #include "native/tutorial_widgets.h"
 #include "native/material_editor.h"
 #include "formats/texture_codec.h"
 #include "assets/pokemon_motions.h"
 #include "native/imgui_renderer.h"
 #include "native/texture_uv_preview.h"
+#include "scene/texture_channels.h"
 #include <imgui.h>
 #include <SDL3/SDL.h>
 #include <fstream>
@@ -12,6 +16,59 @@
 #include <cmath>
 namespace studio {
 namespace {
+bool texture_choice(const std::string &name, bool selected, const Environment &scene,
+                    const EnvironmentRenderer &renderer) {
+    ImGui::PushID(name.c_str());
+    const auto origin = ImGui::GetCursorScreenPos();
+    const float height = 44.f;
+    const float width = ImGui::GetContentRegionAvail().x;
+    bool clicked = ImGui::Selectable("##texture", selected, 0, {width, height});
+    bool hovered = ImGui::IsItemHovered();
+    if (selected)
+        ImGui::SetItemDefaultFocus();
+    auto texture = renderer.texture(name);
+    auto found = scene.textures.find(name);
+    auto *draw = ImGui::GetWindowDrawList();
+    auto preview = [&](ImVec2 start, float limit) {
+        const auto &image = found->second;
+        float scale = limit / std::max(image.width, image.height);
+        ImVec2 size{image.width * scale, image.height * scale};
+        for (float y = 0; y < size.y; y += 8)
+            for (float x = 0; x < size.x; x += 8) {
+                int shade = (int(x / 8) + int(y / 8)) % 2 ? 80 : 125;
+                draw->AddRectFilled(
+                    {start.x + x, start.y + y},
+                    {start.x + std::min(x + 8, size.x), start.y + std::min(y + 8, size.y)},
+                    IM_COL32(shade, shade, shade, 255));
+            }
+        draw->AddImage(ImTextureID(ImGuiRenderer::image_id(texture, true)), start,
+                       {start.x + size.x, start.y + size.y});
+        return size;
+    };
+    bool available = found != scene.textures.end() && bgfx::isValid(texture);
+    if (available)
+        preview({origin.x + 2, origin.y + 2}, 40);
+    else
+        draw->AddText({origin.x + 12, origin.y + 12}, ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                      "?");
+    draw->PushClipRect(origin, {origin.x + width, origin.y + height}, true);
+    draw->AddText({origin.x + 50, origin.y + (height - ImGui::GetTextLineHeight()) * .5f},
+                  ImGui::GetColorU32(ImGuiCol_Text), name.c_str());
+    draw->PopClipRect();
+    if (hovered && ImGui::BeginTooltip()) {
+        ImGui::TextUnformatted(name.c_str());
+        if (available) {
+            draw = ImGui::GetWindowDrawList();
+            auto size = preview(ImGui::GetCursorScreenPos(), 192);
+            ImGui::Dummy(size);
+            ImGui::TextDisabled("%u x %u", found->second.width, found->second.height);
+        } else
+            ImGui::TextDisabled("Preview unavailable");
+        ImGui::EndTooltip();
+    }
+    ImGui::PopID();
+    return clicked;
+}
 TextureImage read_png(const std::filesystem::path &path) {
     auto bytes = read_file(path);
     require(bytes.size() >= 24 && bytes.size() <= 16 * 1024 * 1024 && u32(bytes, 0) == 0x474e5089,
@@ -66,7 +123,8 @@ bool combiner_choice(const char *label, std::uint32_t &word, unsigned shift, uns
     return changed;
 }
 bool combiners_editor(MaterialEdit &edit, const SceneMaterial &material) {
-    if (!studio::TutorialWidgets::CollapsingHeader("material_editor", "Texture combiners"))
+    if (!studio::TutorialWidgets::CollapsingHeader("material_editor", "Texture combiners",
+                                                   ImGuiTreeNodeFlags_DefaultOpen))
         return false;
     ImGui::TextWrapped("Six stages mix textures, lighting and colors. RGB and alpha are "
                        "independent; the final stage becomes the material output.");
@@ -232,11 +290,29 @@ bool combiners_editor(MaterialEdit &edit, const SceneMaterial &material) {
 }
 }
 
+void MaterialEditor::clear_channel_preview() {
+    if (bgfx::isValid(channel_preview_))
+        bgfx::destroy(channel_preview_);
+    channel_preview_ = BGFX_INVALID_HANDLE;
+    channel_preview_name_.clear();
+}
 MaterialEditor::~MaterialEditor() {
+    clear_channel_preview();
     if (export_.valid())
         export_.wait();
 }
+void MaterialEditor::clear() {
+    texture_painter_.close();
+    lighting_editor_.close();
+    clear_channel_preview();
+    project_.unbind();
+    document_.reset();
+    pending_resource_ = {};
+}
 void MaterialEditor::open(ModelDocument model) {
+    texture_painter_.close();
+    lighting_editor_.close();
+    clear_channel_preview();
     require(!texture_encoding_.valid(), "Finish texture encoding before opening another model");
     texture_import_.reset();
     texture_import_open_ = false;
@@ -361,7 +437,8 @@ void MaterialEditor::poll() {
             if (kind == 6 || kind == 5) {
                 texture_import_ = read_png(std::filesystem::u8path(path));
                 texture_add_ = kind == 6;
-                texture_format_ = texture_add_ ? 1 : 0;
+                texture_format_ = texture_add_ || texture_replace_mask_ != 15 ? 1 : 0;
+                texture_import_channel_ = 0;
                 texture_import_error_.clear();
                 if (texture_add_) {
                     texture_import_source_ = Bytes(128);
@@ -369,8 +446,10 @@ void MaterialEditor::poll() {
                     put32(texture_import_source_, 4, 1);
                     put32(texture_import_source_, 20, 0xffffffff);
                     std::copy_n("texture", 7, texture_import_source_.begin() + 8);
-                } else
+                } else {
                     texture_import_source_ = document_->texture_resource(pending_texture_);
+                    texture_import_base_ = document_->model.scene->textures.at(pending_texture_);
+                }
                 texture_import_open_ = true;
             } else if (kind == 1) {
                 auto previous = file_;
@@ -435,6 +514,35 @@ void MaterialEditor::texture_import_panel() {
                     unsigned(u16(texture_import_source_, 104)),
                     unsigned(u16(texture_import_source_, 106)), levels, levels == 1 ? "" : "s");
     ImGui::BeginDisabled(busy);
+    if (!texture_add_) {
+        ImGui::TextUnformatted("Replace channels");
+        const char *labels[] = {"R", "G", "B", "A"};
+        for (unsigned channel = 0; channel < 4; ++channel) {
+            if (channel)
+                ImGui::SameLine();
+            bool selected = (texture_replace_mask_ & (1u << channel)) != 0;
+            if (ImGui::Checkbox(labels[channel], &selected)) {
+                texture_replace_mask_ ^= 1u << channel;
+                if (texture_replace_mask_ != 15)
+                    texture_format_ = 1;
+            }
+        }
+        ImGui::Combo("Read from PNG", &texture_import_channel_,
+                     "Matching channels\0Red / grayscale mask\0Green\0Blue\0Alpha\0");
+        if (texture_replace_mask_ != 15)
+            ImGui::TextUnformatted("RGBA8 preserves unselected channels exactly.");
+    }
+    TextureImage replacement = *texture_import_;
+    std::string channel_error;
+    if (!texture_add_ && (texture_replace_mask_ != 15 || texture_import_channel_ != 0)) {
+        try {
+            replacement =
+                replace_texture_channels(texture_import_base_, *texture_import_,
+                                         texture_replace_mask_, texture_import_channel_ - 1);
+        } catch (const std::exception &e) {
+            channel_error = e.what();
+        }
+    }
     if (ImGui::BeginCombo("Output format", texture_format_
                                                ? texture_format_name(formats[texture_format_ - 1])
                                                : "Keep current format")) {
@@ -448,8 +556,8 @@ void MaterialEditor::texture_import_panel() {
     auto format = texture_format_ ? formats[texture_format_ - 1]
                                   : TextureFormat(u16(texture_import_source_, 108));
     bool color = false, alpha = false;
-    for (std::size_t i = 0; i < texture_import_->rgba.size(); i += 4) {
-        auto p = texture_import_->rgba.data() + i;
+    for (std::size_t i = 0; i < replacement.rgba.size(); i += 4) {
+        auto p = replacement.rgba.data() + i;
         color |= p[0] != p[1] || p[1] != p[2];
         alpha |= p[3] != 255;
     }
@@ -459,6 +567,9 @@ void MaterialEditor::texture_import_panel() {
     bool opaque = format == TextureFormat::RGB8 || format == TextureFormat::RGB565 ||
                   format == TextureFormat::ETC1 || format == TextureFormat::L8 ||
                   format == TextureFormat::L4;
+    if (!texture_add_ && texture_replace_mask_ != 15 && format != TextureFormat::RGBA8)
+        ImGui::TextWrapped("This format may also change unselected channels through compression "
+                           "or reduced precision.");
     if (color && luminance)
         ImGui::TextUnformatted("This format converts color to grayscale.");
     if (alpha_only)
@@ -479,9 +590,12 @@ void MaterialEditor::texture_import_panel() {
         h = std::max(1u, h / 2);
     }
     ImGui::Text("Pixel data: %.1f KiB", double(size) / 1024.0);
+    if (!channel_error.empty())
+        ImGui::TextWrapped("%s", channel_error.c_str());
+    ImGui::BeginDisabled(!channel_error.empty());
     if (studio::TutorialWidgets::Button("material_editor", "Apply texture")) {
         auto source = texture_import_source_;
-        auto pixels = *texture_import_;
+        auto pixels = std::move(replacement);
         auto name = texture_add_ ? pending_texture_ : text(slice(source, 40, 64));
         texture_import_error_.clear();
         texture_encoding_ =
@@ -490,6 +604,7 @@ void MaterialEditor::texture_import_panel() {
                            return encode_texture(source, pixels, name, format);
                        });
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
     if (studio::TutorialWidgets::Button("material_editor", "Cancel")) {
         texture_import_.reset();
@@ -641,6 +756,7 @@ void MaterialEditor::write_panel() {
         }
     }
     ImGui::EndDisabled();
+    ImGui::EndDisabled();
     ImGui::SameLine();
     if (studio::TutorialWidgets::Button("material_editor", "Cancel")) {
         ImGui::CloseCurrentPopup();
@@ -712,9 +828,9 @@ void MaterialEditor::leave_popup() {
         ImGui::EndPopup();
     }
 }
-void MaterialEditor::draw_memory() {
+void MaterialEditor::draw_memory(bool details) {
     auto &doc = *document_;
-    if (!doc.model.is_pokemon())
+    if (!doc.model.is_pokemon() || !doc.model.independent_asset.empty())
         return;
     if (!memory_checked_ || memory_revision_ != doc.revision() ||
         memory_texture_revision_ != doc.texture_revision() ||
@@ -765,6 +881,8 @@ void MaterialEditor::draw_memory() {
                            double(memory.total(false)) / 1048576,
                            double(memory.total(true)) / 1048576);
     }
+    if (!details)
+        return;
     if (studio::TutorialWidgets::TreeNode("material_editor", "Summary memory details")) {
         auto kib = [](std::size_t bytes) {
             return double(bytes) / 1024;
@@ -801,7 +919,7 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
     texture_import_panel();
     ImGui::Begin("Studio materials");
     if (!document_) {
-        ImGui::TextWrapped("Select a model in Models or Maps, then send it to Studio.");
+
         ImGui::End();
         leave_popup();
         return;
@@ -809,12 +927,21 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
     auto &doc = *document_;
     bool busy = dialog_kind_ || export_.valid() || texture_import_ || texture_encoding_.valid();
     ImGui::TextWrapped("%s%s", doc.model.name.c_str(), doc.dirty() ? " *" : "");
-    draw_memory();
+    draw_memory(false);
     ImGui::TextDisabled("%s", doc.dirty()       ? "Unsaved document changes"
                               : project_store() ? "No unsaved project edits"
                               : file_.empty()   ? "Document not saved"
                                                 : "Document saved");
     ImGui::BeginDisabled(busy);
+    ImGui::BeginDisabled(!doc.can_undo());
+    if (studio::TutorialWidgets::Button("material_editor", "Undo"))
+        doc.undo();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!doc.can_redo());
+    if (studio::TutorialWidgets::Button("material_editor", "Redo"))
+        doc.redo();
+    ImGui::EndDisabled();
     if (studio::TutorialWidgets::Button("material_editor",
                                         project_store() ? "Save Project" : "Save edits"))
         try {
@@ -834,18 +961,22 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
             request_leave([this] {
                 dialog(2);
             });
+        ImGui::BeginDisabled(doc.write_count() == 0);
+        if (!doc.model.project_asset && !project_store() &&
+            studio::TutorialWidgets::Button("material_editor", "Write game files...", {-1, 0}))
+            write_open_ = true;
+        ImGui::EndDisabled();
+        draw_memory();
         ImGui::EndPopup();
     }
-    ImGui::BeginDisabled(!doc.can_undo());
-    if (studio::TutorialWidgets::Button("material_editor", "Undo"))
-        doc.undo();
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!doc.can_redo());
-    if (studio::TutorialWidgets::Button("material_editor", "Redo"))
-        doc.redo();
-    ImGui::EndDisabled();
-    if (doc.model.originating_map >= 0 || doc.model.area >= 0) {
+    if (!doc.model.independent_asset.empty()) {
+        ImGui::TextWrapped("Project asset. Export to share; create a character to place it.");
+    } else if (doc.model.project_asset) {
+        ImGui::TextWrapped("Edits belong to this project asset and update all its placed copies.");
+        if (studio::TutorialWidgets::Button("material_editor", "Save and return to Authoring",
+                                            {-1, 0}))
+            apply_ = true;
+    } else if (doc.model.originating_map >= 0 || doc.model.area >= 0) {
         if (project_store() &&
             studio::TutorialWidgets::Button("material_editor", "Stage and return to map", {-1, 0}))
             apply_ = true;
@@ -855,11 +986,6 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Update the open source viewer without writing a game file");
     }
-    ImGui::BeginDisabled(doc.write_count() == 0);
-    if (!project_store() &&
-        studio::TutorialWidgets::Button("material_editor", "Write game files...", {-1, 0}))
-        write_open_ = true;
-    ImGui::EndDisabled();
     ImGui::EndDisabled();
     if (!message_.empty())
         ImGui::TextWrapped("%s", message_.c_str());
@@ -875,12 +1001,7 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
             } catch (const std::exception &e) {
                 message_ = e.what();
             }
-        if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
-            if (io.KeyShift)
-                doc.redo();
-            else
-                doc.undo();
-        }
+
     }
     auto &scene = *doc.model.scene;
     if (effect_selection_ >= 0) {
@@ -903,19 +1024,30 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
             if (ImGui::Selectable(scene.materials[i].name.c_str(), selection.material == int(i))) {
                 selection.material = int(i);
                 selection.draw = -1;
+                selection.meshes.clear();
             }
         ImGui::EndCombo();
     }
-    resource_panel(selection);
+    static const char *pages[] = {"Colors",    "Textures and UVs", "Texture combiners",
+                                  "Rendering", "Borrow effects",   "Model resources"};
+    InspectorSelectorStyle selector_style("Choose material controls");
+    ImGui::Combo("##material-page", &material_page_, pages, 6);
+    selector_style.end();
+    if (material_page_ == 5)
+        resource_panel(selection, renderer);
     if (selection.material >= 0) {
         auto index = std::size_t(selection.material);
         auto edit = doc.edits().at(index);
         auto &material = scene.materials.at(index);
         bool changed = false;
-        if (studio::TutorialWidgets::Button("material_editor", "Reset material"))
-            doc.reset(index);
-        if (studio::TutorialWidgets::CollapsingHeader("material_editor", "Colors",
-                                                      ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Material actions"))
+            ImGui::OpenPopup("Material actions");
+        if (ImGui::BeginPopup("Material actions")) {
+            if (studio::TutorialWidgets::Button("material_editor", "Reset material"))
+                doc.reset(index);
+            ImGui::EndPopup();
+        }
+        if (material_page_ == 0) {
             studio::TutorialWidgets::Checkbox("material_editor", "Show unused constants",
                                               &unused_constants_);
             std::array<bool, 6> used{};
@@ -943,8 +1075,9 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
             changed |= studio::TutorialWidgets::Checkbox("material_editor", "Fragment lighting",
                                                          &edit.fragment_lighting);
         }
-        if (studio::TutorialWidgets::CollapsingHeader("material_editor", "Textures and UVs",
-                                                      ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (material_page_ == 1) {
+            if (ImGui::Button("Open UV view"))
+                uv_request_ = true;
             ImGui::Combo("Texture unit", &texture_unit_, "Texture 0\0Texture 1\0Texture 2\0");
             auto &t = edit.textures[texture_unit_];
             if (t.name.empty())
@@ -953,31 +1086,74 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
                 ImGui::SetNextItemWidth(-1);
                 if (ImGui::BeginCombo("##texture-binding", t.name.c_str())) {
                     for (auto &name : doc.texture_names())
-                        if (ImGui::Selectable(name.c_str(), t.name == name)) {
+                        if (texture_choice(name, t.name == name, scene, renderer)) {
                             t.name = name;
                             changed = true;
                         }
                     ImGui::EndCombo();
                 }
+                ImGui::Combo("View channels", &texture_view_,
+                             "RGBA\0RGB\0Red\0Green\0Blue\0Alpha\0");
                 auto image = scene.textures.find(t.name);
                 auto texture = renderer.texture(t.name);
                 if (image != scene.textures.end() && bgfx::isValid(texture)) {
                     const auto &pixels = image->second;
                     float limit = std::max(1.f, std::min(192.f, ImGui::GetContentRegionAvail().x));
                     float scale = limit / std::max(pixels.width, pixels.height);
-                    ImGui::Image(ImTextureID(ImGuiRenderer::image_id(texture, false)),
-                                 {pixels.width * scale, pixels.height * scale});
+                    if (texture_view_ >= 2) {
+                        if (!bgfx::isValid(channel_preview_) || channel_preview_name_ != t.name ||
+                            channel_preview_mode_ != texture_view_ ||
+                            channel_preview_revision_ != doc.texture_revision()) {
+                            clear_channel_preview();
+                            auto filtered =
+                                texture_channel_preview(pixels, unsigned(texture_view_ - 2));
+                            channel_preview_ = bgfx::createTexture2D(
+                                filtered.width, filtered.height, false, 1,
+                                bgfx::TextureFormat::RGBA8,
+                                BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP,
+                                bgfx::copy(filtered.rgba.data(),
+                                           std::uint32_t(filtered.rgba.size())));
+                            channel_preview_name_ = t.name;
+                            channel_preview_mode_ = texture_view_;
+                            channel_preview_revision_ = doc.texture_revision();
+                        }
+                        texture = channel_preview_;
+                    }
+                    ImVec2 size{pixels.width * scale, pixels.height * scale};
+                    if (texture_view_ == 0) {
+                        auto origin = ImGui::GetCursorScreenPos();
+                        auto *draw = ImGui::GetWindowDrawList();
+                        for (float y = 0; y < size.y; y += 12)
+                            for (float x = 0; x < size.x; x += 12) {
+                                auto shade = (int(x / 12) + int(y / 12)) % 2 ? 90 : 140;
+                                draw->AddRectFilled({origin.x + x, origin.y + y},
+                                                    {origin.x + std::min(x + 12, size.x),
+                                                     origin.y + std::min(y + 12, size.y)},
+                                                    IM_COL32(shade, shade, shade, 255));
+                            }
+                    }
+                    if (bgfx::isValid(texture))
+                        ImGui::Image(
+                            ImTextureID(ImGuiRenderer::image_id(texture, texture_view_ == 0)),
+                            size);
+                    else
+                        ImGui::TextDisabled("Channel preview unavailable");
                     ImGui::TextDisabled("%u x %u", pixels.width, pixels.height);
                 } else
                     ImGui::TextDisabled("Texture preview unavailable");
                 ImGui::BeginDisabled(!doc.model.texture_resources.contains(t.name));
                 if (studio::TutorialWidgets::Button("material_editor", "Replace with PNG...")) {
                     pending_texture_ = t.name;
+                    texture_replace_mask_ = texture_view_ >= 2 ? 1u << (texture_view_ - 2) : 15;
                     dialog(5);
                 }
                 ImGui::SameLine();
                 if (studio::TutorialWidgets::Button("material_editor", "Reset texture"))
                     doc.reset_texture(t.name);
+                ImGui::EndDisabled();
+                ImGui::BeginDisabled(!doc.model.texture_resources.contains(t.name));
+                if (ImGui::Button("Paint texture..."))
+                    texture_painter_.open(t.name);
                 ImGui::EndDisabled();
                 if (!doc.model.texture_resources.contains(t.name))
                     ImGui::TextWrapped("This texture has no writable source link.");
@@ -992,12 +1168,12 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
                 changed |= ImGui::DragFloat2("Offset", t.transform.data() + 3, .002f, -1000, 1000);
                 ImGui::EndDisabled();
                 if (!uv)
-                    ImGui::TextWrapped(
-                        "Projected/environment coordinates are read-only.");
+                    ImGui::TextWrapped("Projected/environment coordinates are read-only.");
             }
         }
-        if (studio::TutorialWidgets::CollapsingHeader("material_editor",
-                                                      "Borrow fragment shader")) {
+        if (material_page_ == 4 &&
+            studio::TutorialWidgets::CollapsingHeader("material_editor", "Borrow fragment shader",
+                                                      ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextWrapped("Uses this material's existing texture units and vertex/lighting "
                                "inputs. Shared shader resources stay unchanged.");
             if (!donor_)
@@ -1034,8 +1210,9 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
             if (!edit.shader_origin.empty())
                 ImGui::TextWrapped("Started from: %s", edit.shader_origin.c_str());
         }
-        if (studio::TutorialWidgets::CollapsingHeader("material_editor",
-                                                      "Borrow material effect")) {
+        if (material_page_ == 4 &&
+            studio::TutorialWidgets::CollapsingHeader("material_editor", "Borrow material effect",
+                                                      ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextWrapped("Apply linked material passes, textures, shaders, lighting tables "
                                "and any looping motions to every mesh using the selected material. "
                                "The target keeps its vertices, UVs and skinning.");
@@ -1071,8 +1248,10 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
                 ImGui::EndDisabled();
             }
         }
-        changed |= combiners_editor(edit, material);
-        if (studio::TutorialWidgets::CollapsingHeader("material_editor", "Outlines")) {
+        if (material_page_ == 2)
+            changed |= combiners_editor(edit, material);
+        if (material_page_ == 3 &&
+            studio::TutorialWidgets::CollapsingHeader("material_editor", "Outlines")) {
             studio::TutorialWidgets::Checkbox("material_editor", "Preview outlines",
                                               &renderer.outlines);
             if (renderer.wireframe)
@@ -1119,7 +1298,19 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
                 ImGui::TextWrapped("Decorative offsets are preserved in game; preview currently "
                                    "uses normal edges.");
         }
-        if (studio::TutorialWidgets::CollapsingHeader("material_editor", "Rendering")) {
+        if (material_page_ == 3 &&
+            studio::TutorialWidgets::CollapsingHeader("material_editor", "Rendering",
+                                                      ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::Button("Edit lighting tables..."))
+                lighting_editor_.open(index);
+            changed |= ImGui::SliderInt("Draw layer", &edit.layer, 0, 7);
+            changed |= ImGui::SliderInt("Draw priority", &edit.priority, 0, 7);
+            ImGui::TextDisabled(
+                "Lower layers draw first; lower priorities draw first within a layer.");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "For nested surfaces, draw the inner material first and the translucent outer "
+                    "material later. These settings save and export.");
             int cull = int(edit.cull);
             if (ImGui::Combo("Culling", &cull, "Two-sided\0Cull front faces\0Cull back faces\0")) {
                 edit.cull = unsigned(cull);
@@ -1186,17 +1377,22 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
         rendered_texture_revision_ = doc.texture_revision();
     }
     ImGui::End();
+    texture_painter_.draw(doc, selection, editing_available());
+    lighting_editor_.draw(doc, editing_available());
     leave_popup();
     write_panel();
 }
 void MaterialEditor::uvs(const EnvironmentRenderer &renderer, const MaterialSelection &selection) {
-    ImGui::Begin("Studio UVs");
+    ImGui::Begin("Studio inspector");
     if (!document_ || selection.material < 0) {
         ImGui::TextWrapped("Select a material to inspect its UVs.");
         ImGui::End();
         return;
     }
-    if (document_->model.area < 0 && !document_->model.clothing) {
+    if (ImGui::Button("Animate mapping..."))
+        mapping_request_ = true;
+    if ((document_->model.area < 0 || document_->model.project_asset) &&
+        !document_->model.clothing) {
         studio::TutorialWidgets::Checkbox("material_editor", "Edit UVs", &edit_uvs_);
         if (edit_uvs_) {
             if (editing_available())
@@ -1231,13 +1427,41 @@ void MaterialEditor::uvs(const EnvironmentRenderer &renderer, const MaterialSele
     auto available = ImGui::GetContentRegionAvail();
     float size = std::max(32.f, std::min(available.x, available.y));
     auto origin = ImGui::GetCursorScreenPos();
-    ImGui::Image(ImTextureID(ImGuiRenderer::image_id(texture, false)), {size, size});
+    draw_texture_checkerboard(origin, {size, size});
+    ImGui::Image(ImTextureID(ImGuiRenderer::image_id(texture, true)), {size, size});
     draw_texture_uvs(scene, std::size_t(selection.material), input, transformed_uvs_, origin, size);
     ImGui::End();
 }
 void MaterialEditor::bind_project() {
     if (!document_)
         return;
+    project_.unbind();
+    if (!document_->model.independent_asset.empty()) {
+        auto key = "studio-asset/" + document_->model.independent_asset;
+        project_.bind("studio-asset", key, document_->model.name, "", [this] { return document_->dirty(); },
+            [this] {
+                require(editing_available(), "Finish the Studio operation before saving");
+                document_->commit();
+                return encode_asset_package(model_asset_package(*document_));
+            }, [this] { document_->mark_saved(); });
+        return;
+    }
+    if (document_->model.project_asset)
+        return;
+    if (document_->model.battle_effect && project_store()) {
+        auto found = project_store()->edits.find("material/" + document_->identity());
+        if (found != project_store()->edits.end()) {
+            auto saved = load_project_effect_model(document_->model.dump, found->second.parameters);
+            auto motions = saved.effect_motions;
+            for (auto motion : document_->model.effect_motions)
+                if (std::find(motions.begin(), motions.end(), motion) == motions.end())
+                    motions.push_back(motion);
+            const auto &link = saved.resources.at(saved.material_resources.front());
+            const auto &source = saved.sources.at(link.source);
+            document_ = std::make_unique<MaterialDocument>(
+                load_effect_model(saved.dump, source.member, source.subfile, link.path, motions));
+        }
+    }
     project_.bind(
         "material", "material/" + document_->identity(), document_->model.name,
         project_model_parameters(document_->model),
@@ -1264,11 +1488,14 @@ void MaterialEditor::bind_project() {
 }
 
 namespace studio {
-void MaterialEditor::resource_panel(const MaterialSelection &selection) {
-    if (!studio::TutorialWidgets::CollapsingHeader("material_editor", "Model resources"))
+void MaterialEditor::resource_panel(const MaterialSelection &selection,
+                                    const EnvironmentRenderer &renderer) {
+    if (!studio::TutorialWidgets::CollapsingHeader("material_editor", "Model resources",
+                                                   ImGuiTreeNodeFlags_DefaultOpen))
         return;
     auto &doc = *document_;
-    ImGui::BeginDisabled(doc.model.area >= 0 || bool(doc.model.clothing));
+    ImGui::BeginDisabled((doc.model.area >= 0 && !doc.model.project_asset) ||
+                         bool(doc.model.clothing));
     ImGui::TextWrapped("Copy a material, then assign faces in Geometry > Materials. Removing a "
                        "material moves its faces to the replacement.");
     ImGui::InputText("New material name", material_name_, sizeof(material_name_));
@@ -1319,7 +1546,7 @@ void MaterialEditor::resource_panel(const MaterialSelection &selection) {
                                 : doc.model.texture_resources.begin()->first;
     if (ImGui::BeginCombo("Texture resource", resource_texture_.c_str())) {
         for (auto &[name, index] : doc.model.texture_resources)
-            if (ImGui::Selectable(name.c_str(), name == resource_texture_))
+            if (texture_choice(name, name == resource_texture_, *doc.model.scene, renderer))
                 resource_texture_ = name;
         ImGui::EndCombo();
     }
@@ -1333,7 +1560,7 @@ void MaterialEditor::resource_panel(const MaterialSelection &selection) {
             resource_replacement_.clear();
         for (auto &[name, index] : doc.model.texture_resources)
             if (name != resource_texture_ &&
-                ImGui::Selectable(name.c_str(), name == resource_replacement_))
+                texture_choice(name, name == resource_replacement_, *doc.model.scene, renderer))
                 resource_replacement_ = name;
         ImGui::EndCombo();
     }

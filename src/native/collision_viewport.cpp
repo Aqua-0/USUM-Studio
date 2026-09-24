@@ -88,17 +88,8 @@ bool CollisionEditor::viewport(const float *view, const float *projection, ImVec
     if (input && hovered && drag_axis_ < 0 && !selecting_ &&
         !ImGui::IsMouseDown(ImGuiMouseButton_Right) && !ImGui::IsMouseDown(ImGuiMouseButton_Middle))
         try {
-            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)) {
-                if (io.KeyShift)
-                    document_->redo();
-                else
-                    document_->undo();
-                synchronize();
-            }
-            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) {
-                document_->redo();
-                synchronize();
-            }
+
+
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A))
                 select_all();
             if (!project_store() && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
@@ -108,9 +99,9 @@ bool CollisionEditor::viewport(const float *view, const float *projection, ImVec
                     select_mode(false);
                 if (ImGui::IsKeyPressed(ImGuiKey_2))
                     select_mode(true);
-                if (ImGui::IsKeyPressed(ImGuiKey_W))
+                if (ImGui::IsKeyPressed(ImGuiKey_G))
                     tool_ = Tool::Move;
-                if (ImGui::IsKeyPressed(ImGuiKey_E))
+                if (ImGui::IsKeyPressed(ImGuiKey_R))
                     tool_ = Tool::Rotate;
                 if (ImGui::IsKeyPressed(ImGuiKey_B))
                     tool_ = Tool::Box;
@@ -189,7 +180,7 @@ bool CollisionEditor::viewport(const float *view, const float *projection, ImVec
     };
     if (gizmo)
         for (unsigned axis = 0; axis < 3; ++axis) {
-            auto color = drag_axis_ == int(axis) ? IM_COL32(255, 230, 135, 255) : colors[axis];
+            auto color = drag_axis_ == int(axis) ? IM_COL32(255, 225, 110, 255) : colors[axis];
             if (tool_ == Tool::Move) {
                 auto end = pivot;
                 end[axis] += handle;
@@ -254,7 +245,7 @@ bool CollisionEditor::viewport(const float *view, const float *projection, ImVec
         } else {
             selecting_ = true;
             mouse_start_ = mouse;
-            selection_add_ = io.KeyShift;
+            selection_add_ = io.KeyCtrl;
         }
     }
     if (drag_axis_ >= 0 && input && !mouse_blocked_) {

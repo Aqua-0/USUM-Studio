@@ -7,6 +7,7 @@
 #include <atomic>
 #include <future>
 #include <memory>
+#include <imgui.h>
 namespace studio {
 class ImageEditor {
   public:
@@ -48,7 +49,8 @@ class ImageEditor {
     char search_[160]{};
     std::size_t selected_ = std::size_t(-1);
     int language_ = -1, channel_ = 0;
-    float zoom_ = 4;
+    float zoom_ = 1;
+    ImVec2 pan_{};
     bool original_ = false, grid_ = false, checker_ = true;
     float background_[3] = {.18f, .20f, .23f};
 };

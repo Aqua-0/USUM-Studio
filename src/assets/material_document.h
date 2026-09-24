@@ -19,10 +19,18 @@ struct MaterialEdit {
     unsigned cull = 0, alpha_function = 1, alpha_reference = 0;
     std::uint32_t blend = 0x01010000, depth = 0x1f51;
     bool fragment_lighting = true;
+    int layer = 0, priority = 0;
     unsigned edge_type = 2, edge_id = 0;
     bool id_edge_enabled = false;
     int edge_alpha_mask = -1;
     bool operator==(const MaterialEdit &) const = default;
+};
+struct MaterialLightingBinding {
+    std::uint32_t table = 0;
+    unsigned input = 0;
+    bool unsigned_range = true;
+    float scale = 1;
+    bool operator==(const MaterialLightingBinding &) const = default;
 };
 class MaterialDocument {
   public:
@@ -47,6 +55,11 @@ class MaterialDocument {
     std::size_t refresh_write_count() const {
         return touched_refresh_.size();
     }
+    std::map<std::uint32_t, LightingTable> lighting_tables() const;
+    std::array<MaterialLightingBinding, 3> lighting_bindings(std::size_t material) const;
+    void edit_lighting_bindings(std::size_t material,
+                                const std::array<MaterialLightingBinding, 3> &bindings);
+    void edit_lighting_table(std::uint32_t table, const LightingTable &values);
     void commit();
     void undo();
     void redo();
@@ -82,11 +95,15 @@ class MaterialDocument {
     std::map<std::size_t, Bytes> compiled_members() const;
     SkinnedModel geometry() const;
     ModelExchange model_exchange() const;
+    std::vector<Bytes> package_members() const;
+    void import_native_members(const std::map<std::size_t, Bytes> &members);
     FaceMaterialEdit assign_material_faces(const MaterialFaces &faces, std::size_t material);
     MotionExchange motion_exchange(std::size_t motion) const;
     void import_motion_exchange(std::size_t motion, const MotionExchange &replacement);
     void edit_uvs(unsigned channel, const MeshUvEdits &edits);
     void import_model_exchange(const ModelExchange &replacement);
+    void import_new_model(const ModelExchange &replacement,
+                          const std::vector<std::size_t> &materials);
     void edit_skeleton(const std::vector<Joint> &joints);
     void edit_visibility_motion(std::size_t index, const VisibilityMotion &replacement);
     void edit_geometry(const SkinnedModel &replacement);
@@ -119,6 +136,8 @@ class MaterialDocument {
     void add_encoded_texture(const std::string &name, View encoded);
     Bytes texture_resource(const std::string &name) const;
     void add_material(std::size_t donor, const std::string &name);
+    void make_material_unique(std::size_t donor, const std::string &name,
+                              const std::set<int> &draws);
     void remove_material(std::size_t material, std::size_t replacement);
     void add_texture(const std::string &name, const TextureImage &image,
                      TextureFormat format = TextureFormat::RGBA8);

@@ -48,6 +48,17 @@ AudioDocument::AudioDocument(const std::filesystem::path &source) : dump(source)
     auto base = info + 8, table = ref(base + 48, base), sounds = ref(base, base),
          banks = ref(base + 16, base), waves = ref(base + 24, base);
     std::map<unsigned, std::vector<unsigned>> uses;
+    std::map<std::pair<unsigned, unsigned>, std::vector<unsigned>> sample_uses;
+    auto embedded_file = [&](unsigned id) -> View {
+        require(id < u32(b, table), "Sound bank references a missing file");
+        auto f = ref(table + 4 + id * 8, table);
+        if (u16(b, f) != 0x220c)
+            return {};
+        auto location = ref(f, f), offset = std::size_t(u32(b, location + 4));
+        if (offset == 0xffffffff)
+            return {};
+        return slice(b, data + 8 + offset, u32(b, location + 8));
+    };
     for (unsigned i = 0; i < u32(b, sounds); ++i) {
         auto sound = ref(sounds + 4 + i * 8, sounds);
         if (u16(b, sound + 12) != 0x2203)
@@ -59,6 +70,29 @@ AudioDocument::AudioDocument(const std::filesystem::path &source) : dump(source)
                 continue;
             auto bank_info = ref(banks + 4 + bank * 8, banks),
                  wave_table = ref(bank_info + 4, bank_info);
+            auto bank_bytes = embedded_file(u32(b, bank_info));
+            if (bank_bytes.size() >= 20 && text(slice(bank_bytes, 0, 4)) == "CBNK") {
+                for (unsigned section = 0; section < u16(bank_bytes, 16); ++section) {
+                    if (u16(bank_bytes, 20 + section * 12) != 0x5800)
+                        continue;
+                    auto info_base = std::size_t(u32(bank_bytes, 24 + section * 12)) + 8;
+                    auto offset = u32(bank_bytes, info_base + 4);
+                    if (offset == 0xffffffff)
+                        continue;
+                    auto wave_ids = info_base + offset;
+                    auto count = u32(bank_bytes, wave_ids);
+                    slice(bank_bytes, wave_ids + 4, std::size_t(count) * 8);
+                    for (unsigned j = 0; j < count; ++j) {
+                        auto wave = u32(bank_bytes, wave_ids + 4 + j * 8) & 0xffffff;
+                        auto sample = u32(bank_bytes, wave_ids + 8 + j * 8);
+                        require(wave < u32(b, waves), "Bank references a missing wave archive");
+                        auto wave_info = ref(waves + 4 + wave * 8, waves);
+                        auto &ids = sample_uses[{u32(b, wave_info), sample}];
+                        if (ids.empty() || ids.back() != i)
+                            ids.push_back(i);
+                    }
+                }
+            }
             for (unsigned j = 0; j < u32(b, wave_table); ++j) {
                 auto wave = u32(b, wave_table + 4 + j * 4) & 0xffffff;
                 if (wave >= u32(b, waves))
@@ -99,11 +133,15 @@ AudioDocument::AudioDocument(const std::filesystem::path &source) : dump(source)
                     "Sound sample exceeds its wave archive");
             auto bytes = slice(b, at, size);
             require(text(slice(bytes, 0, 4)) == "CWAV", "Sound sample is not a native wave");
-            auto label = uses[i].empty() ? "Sound sample file " + std::to_string(i)
-                                         : "Sound " + std::to_string(uses[i].front());
+            auto ids = uses[i];
+            for (auto sound : sample_uses[{i, sample}])
+                if (std::find(ids.begin(), ids.end(), sound) == ids.end())
+                    ids.push_back(sound);
+            auto label = ids.empty() ? "Sound sample file " + std::to_string(i)
+                                     : "Sound " + std::to_string(ids.front());
             label += " / sample " + std::to_string(sample);
             auto key = "niji_sound.bcsar#" + std::to_string(at);
-            tracks.push_back({"niji_sound.bcsar", uses[i], label, key, at, size, true});
+            tracks.push_back({"niji_sound.bcsar", std::move(ids), label, key, at, size, true});
         }
     }
 }

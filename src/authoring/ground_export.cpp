@@ -1,5 +1,6 @@
 #include "authoring/ground_export.h"
 #include "compiler/terrain.h"
+#include "core/digest.h"
 #include "assets/material_document.h"
 #include "formats/compression.h"
 #include "audio/audio_document.h"
@@ -105,8 +106,8 @@ GroundExportResult compile_ground_patch(const std::filesystem::path &dump,
         return found;
     };
     ids = members(document.catalog().area);
-    require(ids.size() == 1, "Ground export requires a map with one terrain resource. "
-                             "Choose a map such as Berry Fields.");
+    require(ids.size() == 1, "This first ground exporter needs a map with one terrain resource. "
+                             "Use Berry Fields for the traversal test.");
     const auto member = *ids.begin();
     for (unsigned area = 0; area < field.size() / TargetProfile::area_stride; ++area)
         if (area != document.catalog().area) {
@@ -131,24 +132,58 @@ GroundExportResult compile_ground_patch(const std::filesystem::path &dump,
                         "Keep the ground patch over the template's existing walkable ground");
                 require(
                     p[1] >= (*hit)[1] - .01f,
-                    "Adding a ground patch retains the original floor. Raise the patch "
+                    "The first ground patch exporter retains the original floor. Raise the patch "
                     "to the original ground or above it.");
             }
-    auto ground = ground_preview(*scene, document.grid(), *document.ground(),
-                                 load_ground_textures(dump, *scene));
+    auto palette = load_ground_textures(dump, *scene);
+    restore_ground_textures(dump, *scene, *document.ground(), palette);
+    auto ground = ground_preview(*scene, document.grid(), *document.ground(), palette);
+    const auto background_member = document.catalog().area * TargetProfile::area_stride +
+                                   TargetProfile::background_resource_slot;
+    auto background = Container::parse(field.decoded(background_member), "BG");
+    auto texture_pack = Container::parse(background.files.at(0), "BG");
+    bool background_changed = false;
+    std::map<std::string, std::string> texture_names;
+    auto export_texture = [&](const std::string &alias) -> std::string {
+        if (auto found = texture_names.find(alias); found != texture_names.end())
+            return found->second;
+        require(!alias.empty() && scene->texture_sources.contains(alias),
+                "Paint every cell with a surface before exporting ground");
+        if (alias.starts_with("terrain/"))
+            return texture_names[alias] = alias.substr(8);
+        auto item = std::find_if(palette.begin(), palette.end(), [&](auto &entry) {
+            return entry.texture == alias;
+        });
+        require(item != palette.end(), "Painted surface is missing from the texture palette");
+        auto bytes = ground_texture_resource(dump, item->key);
+        auto name =
+            "surface_" +
+            sha256(View(reinterpret_cast<const std::uint8_t *>(item->key.data()), item->key.size()))
+                .substr(0, 40) +
+            ".tga";
+        slice(bytes, 40, 64);
+        std::fill(bytes.begin() + 40, bytes.begin() + 104, 0);
+        std::copy(name.begin(), name.end(), bytes.begin() + 40);
+        auto found =
+            std::find_if(texture_pack.files.begin(), texture_pack.files.end(), [&](auto &existing) {
+                return existing.size() >= 104 && text(slice(existing, 40, 64)) == name;
+            });
+        if (found == texture_pack.files.end()) {
+            texture_pack.files.push_back(std::move(bytes));
+            background_changed = true;
+        } else
+            require(*found == bytes, "Imported surface name conflicts with an existing texture");
+        return texture_names[alias] = name;
+    };
     std::vector<TerrainExportMesh> meshes;
     for (auto &draw : ground.draws) {
         auto &surface = ground.materials.at(draw.material);
         TerrainExportMesh mesh;
         mesh.name = "authored_ground_" + std::to_string(meshes.size());
-        auto texture = [&](const std::string &key) {
-            require(key.starts_with("terrain/") && scene->texture_sources.contains(key),
-                    "Paint every cell using the source map's terrain textures before export");
-            return key.substr(8);
-        };
-        mesh.base_texture = texture(surface.texture_inputs[0]);
+
+        mesh.base_texture = export_texture(surface.texture_inputs[0]);
         if (surface.texture_count > 1)
-            mesh.overlay_texture = texture(surface.texture_inputs[1]);
+            mesh.overlay_texture = export_texture(surface.texture_inputs[1]);
         for (auto &v : draw.vertices)
             mesh.vertices.push_back({{v.x, v.y, v.z}, {v.nx, v.ny, v.nz}, {v.u, v.v}, v.color});
         mesh.indices = draw.indices;
@@ -215,7 +250,14 @@ GroundExportResult compile_ground_patch(const std::filesystem::path &dump,
         compiled = block.write(16);
     } else
         compiled = replace_asset_resource(compiled, model_path, model_bytes);
-    return {member, faces.size(), std::move(original), std::move(compiled)};
+    if (background_changed)
+        background.files[0] = texture_pack.write(16);
+    if (document.replaces_terrain() && !background.files.at(4).empty()) {
+        background.files[4].clear();
+        background_changed = true;
+    }
+    return {member, faces.size(), std::move(original), std::move(compiled),
+            background_changed ? background.write(16) : Bytes{}};
 }
 void export_ground_patch(const std::filesystem::path &dump, const CompositionDocument &document,
                          std::uint32_t attribute, const std::filesystem::path &output) {
@@ -228,22 +270,20 @@ void export_ground_patch(const std::filesystem::path &dump, const CompositionDoc
     auto file = output / TargetProfile::terrain_archive;
     std::filesystem::create_directories(file.parent_path());
     archive.export_to(file, {{result.member, stored}});
-    if (document.replaces_terrain()) {
+    if (!result.background.empty()) {
         const auto relative = GameProfile::field_archive(dump);
         Archive field(dump / relative);
         const auto member = document.catalog().area * TargetProfile::area_stride +
                             TargetProfile::background_resource_slot;
-        auto background = Container::parse(field.decoded(member), "BG");
-        if (!background.files.at(4).empty()) {
-            background.files[4].clear();
-            const auto original = field.raw(member);
-            auto bytes = background.write(16);
-            if (!original.empty() && original.front() == 0x11)
-                bytes = compress(bytes);
-            const auto target = output / relative;
-            std::filesystem::create_directories(target.parent_path());
-            field.export_to(target, {{member, std::move(bytes)}});
-        }
+        const auto original = field.raw(member);
+        auto bytes = result.background;
+        if (!original.empty() && original.front() == 0x11)
+            bytes = compress(bytes);
+        require(decompress(bytes) == result.background,
+                "Surface texture export verification failed");
+        const auto target = output / relative;
+        std::filesystem::create_directories(target.parent_path());
+        field.export_to(target, {{member, std::move(bytes)}});
     }
 }
 }

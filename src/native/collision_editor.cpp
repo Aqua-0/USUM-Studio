@@ -1,3 +1,5 @@
+#include "inspector_selector.h"
+#include "native/viewport_navigation.h"
 #include "native/tutorial_widgets.h"
 #include "native/collision_editor.h"
 #include "authoring/ground_export.h"
@@ -470,52 +472,56 @@ void CollisionEditor::layers(bool locked) {
         ImGui::PopID();
     }
     ImGui::Separator();
-    studio::TutorialWidgets::Checkbox("collision_editor", "Show map scenery", &context_);
-    studio::TutorialWidgets::Checkbox("collision_editor", "See through scenery", &xray_);
-    studio::TutorialWidgets::Checkbox("collision_editor", "Filled collision", &filled_);
-    studio::TutorialWidgets::Checkbox("collision_editor", "Triangle edges", &edges_);
-    studio::TutorialWidgets::Checkbox("collision_editor", "Color by attribute", &attribute_colors_);
-    if (attribute_colors_ && ImGui::TreeNodeEx("Surface colors", ImGuiTreeNodeFlags_DefaultOpen)) {
-        std::map<std::uint32_t, std::pair<unsigned, bool>> counts;
-        for (unsigned id = 0; id < document_->size(); ++id) {
-            auto &state = document_->state(id);
-            if (!state.deleted && visible_[unsigned(state.kind)]) {
-                auto &count = counts[state.attribute];
-                ++count.first;
-                count.second |= state.kind == SpatialKind::Ground;
-            }
-        }
-        for (auto [attribute, details] : counts) {
-            auto count = details.first;
-            auto color = collision_surface_color(attribute);
-            ImGui::PushID(std::to_string(attribute).c_str());
-            ImGui::ColorButton("##swatch", {color[0], color[1], color[2], 1},
-                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
-                               {14, 14});
-            ImGui::SameLine();
-            auto label =
-                std::to_string(attribute) + " " +
-                (details.second ? collision_surface_name(attribute) : "Collision attribute") +
-                " (" + std::to_string(count) + ")";
-            if (ImGui::Selectable(label.c_str())) {
-                vertices_mode_ = false;
-                vertices_.clear();
-                if (!ImGui::GetIO().KeyShift)
-                    selection_.clear();
-                for (unsigned id = 0; id < document_->size(); ++id) {
-                    auto &state = document_->state(id);
-                    if (!state.deleted && visible_[unsigned(state.kind)] &&
-                        state.attribute == attribute)
-                        selection_.insert(id);
+    if (ImGui::CollapsingHeader("Display")) {
+        studio::TutorialWidgets::Checkbox("collision_editor", "Show map scenery", &context_);
+        studio::TutorialWidgets::Checkbox("collision_editor", "See through scenery", &xray_);
+        studio::TutorialWidgets::Checkbox("collision_editor", "Filled collision", &filled_);
+        studio::TutorialWidgets::Checkbox("collision_editor", "Triangle edges", &edges_);
+        studio::TutorialWidgets::Checkbox("collision_editor", "Color by attribute",
+                                          &attribute_colors_);
+        if (attribute_colors_ &&
+            ImGui::TreeNodeEx("Surface colors", ImGuiTreeNodeFlags_DefaultOpen)) {
+            std::map<std::uint32_t, std::pair<unsigned, bool>> counts;
+            for (unsigned id = 0; id < document_->size(); ++id) {
+                auto &state = document_->state(id);
+                if (!state.deleted && visible_[unsigned(state.kind)]) {
+                    auto &count = counts[state.attribute];
+                    ++count.first;
+                    count.second |= state.kind == SpatialKind::Ground;
                 }
             }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", label.c_str());
-            ImGui::PopID();
+            for (auto [attribute, details] : counts) {
+                auto count = details.first;
+                auto color = collision_surface_color(attribute);
+                ImGui::PushID(std::to_string(attribute).c_str());
+                ImGui::ColorButton("##swatch", {color[0], color[1], color[2], 1},
+                                   ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                                   {14, 14});
+                ImGui::SameLine();
+                auto label =
+                    std::to_string(attribute) + " " +
+                    (details.second ? collision_surface_name(attribute) : "Collision attribute") +
+                    " (" + std::to_string(count) + ")";
+                if (ImGui::Selectable(label.c_str())) {
+                    vertices_mode_ = false;
+                    vertices_.clear();
+                    if (!ImGui::GetIO().KeyCtrl)
+                        selection_.clear();
+                    for (unsigned id = 0; id < document_->size(); ++id) {
+                        auto &state = document_->state(id);
+                        if (!state.deleted && visible_[unsigned(state.kind)] &&
+                            state.attribute == attribute)
+                            selection_.insert(id);
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", label.c_str());
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
         }
-        ImGui::TreePop();
     }
-    ImGui::Spacing();
+    ImGui::SeparatorText("Selection");
     if (studio::TutorialWidgets::Button("collision_editor", "Select all"))
         select_all();
     if (studio::TutorialWidgets::Button("collision_editor", "Select connected"))
@@ -525,31 +531,7 @@ void CollisionEditor::layers(bool locked) {
         vertices_.clear();
     }
     ImGui::Separator();
-    try {
-        if (primary_button(project_store() ? "Save Project" : "Save patch"))
-            save();
-        if (!authored_changed_)
-            next_control(85);
-        if (!project_store() && studio::TutorialWidgets::Button("collision_editor", "Save as..."))
-            dialog(1);
-        if (!authored_changed_ &&
-            studio::TutorialWidgets::Button("collision_editor", "Open patch..."))
-            request_leave([this] {
-                dialog(2);
-            });
-        if (!authored_changed_) {
-            ImGui::BeginDisabled(!document_->changed());
-            if (studio::TutorialWidgets::Button("collision_editor", "Export override..."))
-                dialog(3);
-            ImGui::EndDisabled();
-        } else
-            ImGui::TextWrapped(
-                "Save Project keeps custom collision with the composition. Stage Project combines "
-                "it with the terrain; Build game export creates game files.");
-    } catch (const std::exception &e) {
-        message_ = e.what();
-    }
-    if (ImGui::TreeNodeEx("Blender exchange", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::TreeNode("Blender exchange")) {
         studio::TutorialWidgets::Checkbox("collision_editor", "Include map reference geometry",
                                           &export_reference_);
         if (studio::TutorialWidgets::Button("collision_editor", "Export collision OBJ..."))
@@ -606,9 +588,9 @@ void CollisionEditor::toolbar(bool locked) {
         if (pressed)
             tool_ = mode;
     };
-    tool_button("    Move", Tool::Move);
+    tool_button("    Move (G)", Tool::Move);
     next_control(95);
-    tool_button("    Rotate", Tool::Rotate);
+    tool_button("    Rotate (R)", Tool::Rotate);
     next_control(75);
     studio::TutorialWidgets::Checkbox("collision_editor", "Snap", &snap_);
     if (ImGui::IsItemHovered())
@@ -617,7 +599,7 @@ void CollisionEditor::toolbar(bool locked) {
     if (studio::TutorialWidgets::Button("collision_editor", "Frame selection"))
         frame_selection();
     next_control(75);
-    if (studio::TutorialWidgets::Button("collision_editor", "Fit map"))
+    if (studio::TutorialWidgets::Button("collision_editor", "Frame map"))
         frame_selection(true);
     ImGui::EndDisabled();
 }
@@ -645,134 +627,173 @@ void CollisionEditor::inspector(bool locked) {
     ImGui::SameLine();
     if (studio::TutorialWidgets::Button("collision_editor", "Reset all"))
         document_->reset();
-    ImGui::Separator();
-    ImGui::BeginDisabled(refs.empty());
-    ImGui::TextUnformatted("Transform");
-    ImGui::TextWrapped("World axes; pivot at the selection center.");
-    if (!refs.empty()) {
-        SpatialPoint center{};
-        for (auto v : refs)
-            for (unsigned k = 0; k < 3; ++k)
-                center[k] += document_->state(v.face).vertices[v.corner][k] / float(refs.size());
-        ImGui::Text("X %.2f  Y %.2f  Z %.2f", center[0], center[1], center[2]);
-    }
-    ImGui::TextUnformatted("Target height (Y)");
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputFloat("##height", &height_, 0, 0, "%.3f");
-    if (studio::TutorialWidgets::Button("collision_editor", "Apply height"))
-        try {
-            height_edit(true, height_);
-        } catch (const std::exception &e) {
-            message_ = e.what();
+    try {
+        if (studio::TutorialWidgets::Button("collision_editor",
+                                            project_store() ? "Save Project" : "Save patch"))
+            save();
+        if (ImGui::CollapsingHeader("Document actions")) {
+            if (!project_store() &&
+                studio::TutorialWidgets::Button("collision_editor", "Save as..."))
+                dialog(1);
+            if (!authored_changed_ &&
+                studio::TutorialWidgets::Button("collision_editor", "Open patch..."))
+                request_leave([this] {
+                    dialog(2);
+                });
+            if (!authored_changed_) {
+                ImGui::BeginDisabled(!document_->changed());
+                if (studio::TutorialWidgets::Button("collision_editor", "Export override..."))
+                    dialog(3);
+                ImGui::EndDisabled();
+            } else
+                ImGui::TextWrapped("Save Project keeps custom collision with the composition. "
+                                   "Stage Project combines "
+                                   "it with the terrain; Build game export creates game files.");
         }
-    if (studio::TutorialWidgets::TreeNode("collision_editor", "Nudge height")) {
-        ImGui::InputFloat("Units", &step_);
-        ImGui::BeginDisabled(!std::isfinite(step_) || step_ <= 0);
-        if (studio::TutorialWidgets::Button("collision_editor", "Lower"))
-            try {
-                height_edit(false, -step_);
-            } catch (const std::exception &e) {
-                message_ = e.what();
-            }
-        ImGui::SameLine();
-        if (studio::TutorialWidgets::Button("collision_editor", "Raise"))
-            try {
-                height_edit(false, step_);
-            } catch (const std::exception &e) {
-                message_ = e.what();
-            }
-        ImGui::EndDisabled();
-        ImGui::TreePop();
+    } catch (const std::exception &e) {
+        message_ = e.what();
     }
-    ImGui::BeginDisabled(vertices_mode_);
-    studio::TutorialWidgets::Checkbox("collision_editor", "Keep shared vertices together",
-                                      &shared_);
-    ImGui::EndDisabled();
-    ImGui::TextWrapped(
-        vertices_mode_ ? "Vertex edits move attached triangles in the same collision resource."
-        : shared_ ? "Shared corners follow the selection. Turn this off to separate selected faces."
-                  : "Selected faces move independently of their neighbors.");
-    ImGui::EndDisabled();
     ImGui::Separator();
-    ImGui::BeginDisabled(vertices_mode_ || selection_.empty());
-    std::optional<SpatialKind> kind;
-    std::optional<std::uint32_t> attribute;
-    bool first = true, ground = true;
-    for (auto id : selection_) {
-        auto &state = document_->state(id);
-        ground &= state.kind == SpatialKind::Ground;
-        if (first) {
-            kind = state.kind;
-            attribute = state.attribute;
-            first = false;
-        } else {
-            if (kind && *kind != state.kind)
-                kind.reset();
-            if (attribute && *attribute != state.attribute)
-                attribute.reset();
+    InspectorSelectorStyle tool_style("Choose editing tool");
+    ImGui::Combo("##collision-tool", &inspector_page_, "Transform\0Surface and type\0");
+    tool_style.end();
+    if (inspector_page_ == 0) {
+        ImGui::BeginDisabled(refs.empty());
+        ImGui::TextUnformatted("Transform");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("World axes; pivot at the selection center.");
+        if (!refs.empty()) {
+            SpatialPoint center{};
+            for (auto v : refs)
+                for (unsigned k = 0; k < 3; ++k)
+                    center[k] +=
+                        document_->state(v.face).vertices[v.corner][k] / float(refs.size());
+            ImGui::Text("X %.2f  Y %.2f  Z %.2f", center[0], center[1], center[2]);
         }
-    }
-    ImGui::TextUnformatted("Collision type");
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##kind", kind ? layer_names[unsigned(*kind)] : "Mixed / none")) {
-        for (unsigned i = 0; i < 5; ++i)
-            if (ImGui::Selectable(layer_names[i], kind && unsigned(*kind) == i))
-                try {
-                    document_->properties(selection_, SpatialKind(i), {});
-                    visible_[i] = true;
-                } catch (const std::exception &e) {
-                    message_ = e.what();
-                }
-        ImGui::EndCombo();
-    }
-    ImGui::TextWrapped("Type changes move triangles between ground and wall resources on export.");
-    ImGui::BeginDisabled(!ground);
-    ImGui::TextUnformatted("Ground surface");
-    auto label = attribute ? collision_surface_name(*attribute) : "Mixed / none";
-    if (attribute) {
-        auto color = collision_surface_color(*attribute);
-        ImGui::ColorButton("##surface-color", {color[0], color[1], color[2], 1},
-                           ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
-                           {14, 14});
-        ImGui::SameLine();
-        ImGui::TextUnformatted(label.c_str());
-    }
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##surface", label.c_str())) {
-        for (unsigned i = 0; i < collision_surfaces.size(); ++i)
-            if (ImGui::Selectable(
-                    (std::string(collision_surfaces[i]) + " (" + std::to_string(i) + ")").c_str(),
-                    attribute && *attribute == i))
-                try {
-                    document_->properties(selection_, {}, i);
-                } catch (const std::exception &e) {
-                    message_ = e.what();
-                }
-        ImGui::EndCombo();
-    }
-    if (attribute)
-        ImGui::Text("Attribute %u (0x%08X)", *attribute, *attribute);
-    if (attribute && *attribute == 38)
-        ImGui::TextWrapped("This Ultra Moon entry has a provisional name.");
-    ImGui::TextWrapped(
-        "Footsteps are selected by the game using the ground surface and character animation.");
-    if (studio::TutorialWidgets::TreeNode("collision_editor", "Raw surface attribute")) {
+        ImGui::TextUnformatted("Target height (Y)");
         ImGui::SetNextItemWidth(-1);
-        ImGui::InputScalar("##raw", ImGuiDataType_U32, &raw_attribute_);
-        if (studio::TutorialWidgets::Button("collision_editor", "Apply attribute"))
+        ImGui::InputFloat("##height", &height_, 0, 0, "%.3f");
+        if (studio::TutorialWidgets::Button("collision_editor", "Apply height"))
             try {
-                document_->properties(selection_, {}, raw_attribute_);
+                height_edit(true, height_);
             } catch (const std::exception &e) {
                 message_ = e.what();
             }
-        ImGui::TextWrapped("Unknown values are preserved. They have no verified surface meaning.");
-        ImGui::TreePop();
-    }
-    if (attribute && (*attribute == 7 || *attribute == 8 || *attribute == 21))
+        if (studio::TutorialWidgets::TreeNode("collision_editor", "Nudge height")) {
+            ImGui::InputFloat("Units", &step_);
+            ImGui::BeginDisabled(!std::isfinite(step_) || step_ <= 0);
+            if (studio::TutorialWidgets::Button("collision_editor", "Lower"))
+                try {
+                    height_edit(false, -step_);
+                } catch (const std::exception &e) {
+                    message_ = e.what();
+                }
+            ImGui::SameLine();
+            if (studio::TutorialWidgets::Button("collision_editor", "Raise"))
+                try {
+                    height_edit(false, step_);
+                } catch (const std::exception &e) {
+                    message_ = e.what();
+                }
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+        ImGui::BeginDisabled(vertices_mode_);
+        studio::TutorialWidgets::Checkbox("collision_editor", "Keep shared vertices together",
+                                          &shared_);
+        ImGui::EndDisabled();
         ImGui::TextWrapped(
-            "Water attributes alone do not enable Surf; entry also uses Surf boundaries.");
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
+            vertices_mode_ ? "Vertex edits move attached triangles in the same collision resource."
+            : shared_
+                ? "Shared corners follow the selection. Turn this off to separate selected faces."
+                : "Selected faces move independently of their neighbors.");
+        ImGui::EndDisabled();
+        ImGui::Separator();
+    } else {
+        ImGui::BeginDisabled(vertices_mode_ || selection_.empty());
+        std::optional<SpatialKind> kind;
+        std::optional<std::uint32_t> attribute;
+        bool first = true, ground = true;
+        for (auto id : selection_) {
+            auto &state = document_->state(id);
+            ground &= state.kind == SpatialKind::Ground;
+            if (first) {
+                kind = state.kind;
+                attribute = state.attribute;
+                first = false;
+            } else {
+                if (kind && *kind != state.kind)
+                    kind.reset();
+                if (attribute && *attribute != state.attribute)
+                    attribute.reset();
+            }
+        }
+        ImGui::TextUnformatted("Collision type");
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##kind", kind ? layer_names[unsigned(*kind)] : "Mixed / none")) {
+            for (unsigned i = 0; i < 5; ++i)
+                if (ImGui::Selectable(layer_names[i], kind && unsigned(*kind) == i))
+                    try {
+                        document_->properties(selection_, SpatialKind(i), {});
+                        visible_[i] = true;
+                    } catch (const std::exception &e) {
+                        message_ = e.what();
+                    }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Type changes move triangles between ground and wall resources on export.");
+        ImGui::BeginDisabled(!ground);
+        ImGui::TextUnformatted("Ground surface");
+        auto label = attribute ? collision_surface_name(*attribute) : "Mixed / none";
+        if (attribute) {
+            auto color = collision_surface_color(*attribute);
+            ImGui::ColorButton("##surface-color", {color[0], color[1], color[2], 1},
+                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                               {14, 14});
+            ImGui::SameLine();
+            ImGui::TextUnformatted(label.c_str());
+        }
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##surface", label.c_str())) {
+            for (unsigned i = 0; i < collision_surfaces.size(); ++i)
+                if (ImGui::Selectable(
+                        (std::string(collision_surfaces[i]) + " (" + std::to_string(i) + ")")
+                            .c_str(),
+                        attribute && *attribute == i))
+                    try {
+                        document_->properties(selection_, {}, i);
+                    } catch (const std::exception &e) {
+                        message_ = e.what();
+                    }
+            ImGui::EndCombo();
+        }
+        if (attribute)
+            ImGui::Text("Attribute %u (0x%08X)", *attribute, *attribute);
+        if (attribute && *attribute == 38)
+            ImGui::TextWrapped("This collision attribute has a provisional name.");
+        ImGui::TextWrapped(
+            "Footsteps are selected by the game using the ground surface and character animation.");
+        if (studio::TutorialWidgets::TreeNode("collision_editor", "Raw surface attribute")) {
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputScalar("##raw", ImGuiDataType_U32, &raw_attribute_);
+            if (studio::TutorialWidgets::Button("collision_editor", "Apply attribute"))
+                try {
+                    document_->properties(selection_, {}, raw_attribute_);
+                } catch (const std::exception &e) {
+                    message_ = e.what();
+                }
+            ImGui::TextWrapped(
+                "Unknown values are preserved. They have no verified surface meaning.");
+            ImGui::TreePop();
+        }
+        if (attribute && (*attribute == 7 || *attribute == 8 || *attribute == 21))
+            ImGui::TextWrapped(
+                "Water attributes alone do not enable Surf; entry also uses Surf boundaries.");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+    }
     ImGui::EndDisabled();
     modal();
     ImGui::End();
@@ -889,29 +910,30 @@ bool CollisionEditor::draw_workspace(bool loading) {
         bool captured = viewport(view, projection, origin, size, hovered);
         auto &io = ImGui::GetIO();
         if (!captured && hovered && !io.WantTextInput) {
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
-                camera_.rotate(io.MouseDelta.x, io.MouseDelta.y, false);
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
-                camera_.pan(io.MouseDelta.x, io.MouseDelta.y);
-            camera_.wheel(io.MouseWheel, false);
+            viewport_navigation(camera_, window_, true);
         }
         ImGui::End();
     }
-    ImGui::Begin("Collision status");
+    ImGui::Begin("Collision properties");
+    ImGui::Separator();
     if (loading)
         ImGui::TextUnformatted("Loading map; collision editing is paused.");
     if (!message_.empty())
         ImGui::TextWrapped("%s", message_.c_str());
-    ImGui::TextWrapped(
-        "Click selects; Shift adds/removes. 1/2: triangles/vertices. W/E: move/rotate. B: box. "
-        "Ctrl snaps; Escape cancels. Middle drag orbits, right drag pans, wheel zooms.");
-    ImGui::TextWrapped("%s", authored_changed_
-                                 ? "Editing only authored collision. Original map scenery is "
-                                   "reference. Terrain and custom collision move independently; "
-                                   "regenerate from Authoring to follow terrain again."
-                                 : "Collision edits do not move the visual terrain. Export writes "
-                                   "a separate archive; shared resources affect every area using "
-                                   "them. In-game validation is still required.");
+    if (ImGui::CollapsingHeader("Controls")) {
+        ImGui::TextWrapped(
+            "Click selects; Ctrl adds/removes. 1/2: triangles/vertices. G/R: move/rotate. B: box. "
+            "Ctrl snaps; Escape cancels.");
+        ImGui::TextWrapped("%s", viewport_navigation_help);
+        ImGui::TextWrapped("%s",
+                           authored_changed_
+                               ? "Editing only authored collision. Original map scenery is "
+                                 "reference. Terrain and custom collision move independently; "
+                                 "regenerate from Authoring to follow terrain again."
+                               : "Collision edits do not move the visual terrain. Export writes "
+                                 "a separate archive; shared resources affect every area using "
+                                 "them. In-game validation is still required.");
+    }
     if (document_ && studio::TutorialWidgets::Button(
                          "collision_editor",
                          authored_changed_ ? "Return to Authoring" : "Choose another map in Maps"))

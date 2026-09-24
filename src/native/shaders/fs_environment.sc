@@ -29,6 +29,7 @@ uniform vec4 u_constants[6];
 uniform vec4 u_bufferWrites[6];
 uniform vec4 u_buffer;
 uniform vec4 u_preview;
+uniform vec4 u_texturePrecision;
 uniform vec4 u_projectionOptions;
 uniform vec4 u_cutaway;
 uniform vec4 u_lighting;
@@ -36,6 +37,17 @@ uniform vec4 u_bump;
 uniform vec4 u_lightDirection;
 uniform vec4 u_surface[5];
 uniform vec4 u_textureOptions[3];
+float textureCoordinatePrecision(float value) {
+  uint bits = floatBitsToUint(value);
+  if ((bits & 0x7f800000u) == 0x7f800000u) return value;
+  // Round 23 fraction bits to 16, with nearest-even ties.
+  bits = (bits + 63u + ((bits >> 7u) & 1u)) & 0xffffff80u;
+  return uintBitsToFloat(bits);
+}
+vec2 textureCoordinates(vec2 uv) {
+  if (u_texturePrecision.x < 0.5) return uv;
+  return vec2(textureCoordinatePrecision(uv.x), textureCoordinatePrecision(uv.y));
+}
 vec3 unitDirection(vec3 value, vec3 fallback) {
   float size = dot(value,value);
   return size > 0.000001 ? value*inversesqrt(size) : fallback;
@@ -126,11 +138,11 @@ void main() {
   }
   vec2 uv0 = materialUV(0, v_texcoord0, v_texcoord1, v_texcoord2, v_normal);
   if(u_projectionOptions.x>0.5)uv0=v_projectedUv.xy/(abs(v_projectedUv.z)>0.000001?v_projectedUv.z:0.000001);
-  vec4 tex0 = texture2DLod(s_tex, uv0, materialLod(0,uv0));
+  vec4 tex0 = texture2DLod(s_tex, textureCoordinates(uv0), materialLod(0,uv0));
   vec2 uv1 = materialUV(1, v_texcoord0, v_texcoord1, v_texcoord2, v_normal);
-  vec4 tex1 = texture2DLod(s_tex1, uv1, materialLod(1,uv1));
+  vec4 tex1 = texture2DLod(s_tex1, textureCoordinates(uv1), materialLod(1,uv1));
   vec2 uv2 = materialUV(2, v_texcoord0, v_texcoord1, v_texcoord2, v_normal);
-  vec4 tex2 = texture2DLod(s_tex2, uv2, materialLod(2,uv2));
+  vec4 tex2 = texture2DLod(s_tex2, textureCoordinates(uv2), materialLod(2,uv2));
   vec4 primary = mix(vec4(1.0), v_color0, u_preview.y);
   vec4 fragmentPrimary = vec4(1.0), fragmentSecondary = vec4(0.0);
   if(u_lighting.w > 0.5 && u_gameLight.w > 0.5) {

@@ -9,7 +9,7 @@ class PickupEditor {
     }
     void set_scene(std::shared_ptr<Environment> scene, unsigned area,
                    const std::filesystem::path &dump);
-    void draw(bool loading);
+    void draw(bool loading, bool show_launcher = true);
 
   private:
     void synchronize();

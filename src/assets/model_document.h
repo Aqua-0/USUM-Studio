@@ -10,11 +10,18 @@ struct AssetSourceMember {
     std::size_t member = 0;
     std::string role, hash;
     Bytes original;
+    unsigned subfile = 0;
 };
 struct AssetResourceLink {
     std::size_t source = 0;
     std::vector<std::size_t> path;
     std::string role, name;
+};
+struct EffectMotionSource {
+    std::size_t member = 0;
+    unsigned subfile = 0;
+    std::vector<std::size_t> path;
+    bool operator==(const EffectMotionSource &) const = default;
 };
 struct ClothingSelection;
 struct AssetMotion {
@@ -43,6 +50,10 @@ struct ModelDocument {
     std::string name, texture_prefix = "model/";
     int area = -1;
     int originating_map = -1;
+    bool battle_effect = false;
+    bool project_asset = false;
+    std::string independent_asset;
+    std::vector<EffectMotionSource> effect_motions;
     bool shiny = false, shadow_model = false, has_shadow_model = false;
     std::shared_ptr<Environment> scene;
     std::vector<AssetSourceMember> sources;

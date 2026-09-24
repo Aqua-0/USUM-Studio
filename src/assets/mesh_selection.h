@@ -4,6 +4,7 @@
 #include <set>
 #include <map>
 #include <cmath>
+#include <optional>
 namespace studio {
 using MeshVertexSelection = std::map<std::size_t, std::set<std::size_t>>;
 using MeshInfluences = std::map<std::size_t, std::map<std::size_t, float>>;
@@ -46,6 +47,8 @@ class MeshSurface {
     void build(const SkinnedModel &model, const std::vector<bool> &visible, const float *view,
                const float *projection, unsigned w, unsigned h,
                const std::vector<Matrix> &poses = {}, const std::vector<unsigned> &culls = {});
+    std::optional<MeshSurfacePixel> pick_face(const SkinnedModel &model, float x, float y,
+        const std::set<std::size_t> &editable, const std::vector<unsigned> &culls, bool through) const;
     const MeshSurfacePixel *at(float x, float y) const;
     bool visible(const MeshProjection &point) const;
 };

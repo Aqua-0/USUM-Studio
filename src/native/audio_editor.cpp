@@ -1,3 +1,5 @@
+#include "audio/wave_import.h"
+#include "inspector_selector.h"
 #include "native/tutorial_widgets.h"
 #include "native/audio_editor.h"
 #include "native/theme.h"
@@ -243,7 +245,7 @@ void AudioEditor::update(bool active) {
                 require(std::filesystem::file_size(file) <= 512ull * 1024 * 1024,
                         "Stream import exceeds the decoder's supported size");
                 if (document_->tracks.at(selected_).effect) {
-                    auto input = import_cry_wav(read_file(file));
+                    auto input = import_audio_wav(read_file(file));
                     auto original = document_->current(selected_);
                     encoding_ = std::async(std::launch::async, [original = std::move(original),
                                                                 input = std::move(input)] {
@@ -348,7 +350,7 @@ void AudioEditor::draw(const std::filesystem::path &dump) {
         ImGui::TextWrapped("Dump changed. Reload the audio library to use it.");
     ImGui::BeginDisabled(busy);
     static const char *categories[] = {"Music streams", "Pokemon cries", "Sound effects"};
-    ImGui::SetNextItemWidth(-1);
+    InspectorSelectorStyle category_style("Choose audio category");
     if (ImGui::Combo("##audio-category", &category_, categories, 3)) {
         stop();
         search_[0] = 0;
@@ -361,6 +363,8 @@ void AudioEditor::draw(const std::filesystem::path &dump) {
                 select(std::size_t(it - document_->tracks.begin()));
         }
     }
+    category_style.end();
+    ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##audio-search", "Search audio", search_, sizeof(search_));
     std::string query = search_;
     std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) {
@@ -440,26 +444,10 @@ void AudioEditor::draw(const std::filesystem::path &dump) {
             ImGui::Text("%u Hz | %u channels | %.2f seconds", samples_.rate, samples_.channels,
                         double(samples_.frames()) / samples_.rate);
         }
-        if (studio::TutorialWidgets::Button("audio_editor", "Export WAV..."))
-            choose(Action::Wave);
-        ImGui::SameLine();
-        if (studio::TutorialWidgets::Button("audio_editor", document_->tracks[selected_].effect
-                                                                ? "Import WAV..."
-                                                                : "Import BCSTM..."))
-            choose(Action::Import);
-        if (document_->tracks[selected_].effect)
-            ImGui::TextWrapped("Replace the underlying sample. Game sequences may change pitch and "
-                               "timing. WAV is converted to the native rate and channels; shorter "
-                               "clips are padded. Keep the existing duration and loop points.");
-        else
-            ImGui::TextWrapped("Music replacements retain duration, channels, sample rate and loop "
-                               "points. Export WAV for external editing, then encode a matching "
-                               "BCSTM. WAV import is available for Pokemon cries.");
-        if (studio::TutorialWidgets::Button("audio_editor", "Reset track")) {
-            document_->reset(selected_);
-            select(selected_);
-        }
-        ImGui::SameLine();
+        ImGui::EndDisabled();
+        ImGui::End();
+        ImGui::Begin("Audio inspector");
+        ImGui::BeginDisabled(busy);
         if (studio::TutorialWidgets::Button("audio_editor", "Undo")) {
             if (document_->undo())
                 select(selected_);
@@ -474,7 +462,6 @@ void AudioEditor::draw(const std::filesystem::path &dump) {
         if (studio::TutorialWidgets::Button(
                 "audio_editor", project_store() ? "Save Project" : "Save audio project..."))
             choose(Action::Save);
-        ImGui::SameLine();
         if (studio::TutorialWidgets::Button("audio_editor", "Open audio project..."))
             request_leave([this] {
                 choose(Action::Load);
@@ -486,32 +473,61 @@ void AudioEditor::draw(const std::filesystem::path &dump) {
         ImGui::Text("%zu replacements%s", document_->size(),
                     document_->dirty() ? " | Unsaved" : "");
         ImGui::EndDisabled();
+        ImGui::SeparatorText("Edit track");
+        ImGui::BeginDisabled(busy || samples_.pcm.empty());
+        if (studio::TutorialWidgets::Button("audio_editor", "Export WAV..."))
+            choose(Action::Wave);
+        ImGui::SameLine();
+        if (studio::TutorialWidgets::Button("audio_editor", document_->tracks[selected_].effect
+                                                                ? "Import WAV..."
+                                                                : "Import BCSTM..."))
+            choose(Action::Import);
+        if (ImGui::CollapsingHeader("Replacement requirements")) {
+            if (document_->tracks[selected_].effect)
+                ImGui::TextWrapped(
+                    "Replace the underlying sample. Game sequences may change pitch and "
+                    "timing. WAV is converted to the native rate and channels; shorter "
+                    "clips are padded. Keep the existing duration and loop points.");
+            else
+                ImGui::TextWrapped(
+                    "Music replacements retain duration, channels, sample rate and loop "
+                    "points. Export WAV for external editing, then encode a matching "
+                    "BCSTM. WAV import is available for Pokemon cries.");
+        }
+
+        if (studio::TutorialWidgets::Button("audio_editor", "Reset track")) {
+            document_->reset(selected_);
+            select(selected_);
+        }
+        ImGui::EndDisabled();
     } else
         ImGui::TextUnformatted("Load the audio library to begin.");
     ImGui::End();
-    ImGui::Begin("Audio source");
-    ImGui::TextWrapped("Dump: %s", dump_.string().c_str());
-    if (document_ && category_ != 1 && selected_ < document_->tracks.size()) {
-        auto &track = document_->tracks[selected_];
-        ImGui::TextWrapped("Source: romfs/data/sound/%s", track.file.c_str());
-        if (track.effect)
-            ImGui::Text("Embedded sample offset: %zu", track.offset);
-        ImGui::Text("Frames: %zu", samples_.frames());
-        if (samples_.looping)
-            ImGui::Text("Loop starts at sample %u", samples_.loop_start);
-        ImGui::TextWrapped(track.effect ? "Referenced by %zu sounds through their instrument banks:"
-                                        : "Referenced by %zu sound entries:",
-                           track.sounds.size());
-        std::string ids;
-        for (auto id : track.sounds) {
-            if (!ids.empty())
-                ids += ", ";
-            ids += std::to_string(id);
+    ImGui::Begin("Audio inspector");
+    if (ImGui::CollapsingHeader("Source details")) {
+        ImGui::TextWrapped("Dump: %s", dump_.string().c_str());
+        if (document_ && category_ != 1 && selected_ < document_->tracks.size()) {
+            auto &track = document_->tracks[selected_];
+            ImGui::TextWrapped("Source: romfs/data/sound/%s", track.file.c_str());
+            if (track.effect)
+                ImGui::Text("Embedded sample offset: %zu", track.offset);
+            ImGui::Text("Frames: %zu", samples_.frames());
+            if (samples_.looping)
+                ImGui::Text("Loop starts at sample %u", samples_.loop_start);
+            ImGui::TextWrapped(track.effect
+                                   ? "Referenced by %zu sounds through their instrument banks:"
+                                   : "Referenced by %zu sound entries:",
+                               track.sounds.size());
+            std::string ids;
+            for (auto id : track.sounds) {
+                if (!ids.empty())
+                    ids += ", ";
+                ids += std::to_string(id);
+            }
+            ImGui::TextWrapped("%s", ids.c_str());
         }
-        ImGui::TextWrapped("%s", ids.c_str());
     }
-    ImGui::End();
-    ImGui::Begin("Audio status");
+    ImGui::Separator();
     if (busy)
         ImGui::TextUnformatted("Processing audio...");
     ImGui::TextWrapped("%s", notice_.c_str());

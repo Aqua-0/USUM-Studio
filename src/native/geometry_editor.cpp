@@ -1,3 +1,4 @@
+#include "native/viewport_navigation.h"
 #include "native/tutorial_widgets.h"
 #include "native/geometry_editor.h"
 #include "native/imgui_renderer.h"
@@ -120,7 +121,7 @@ void GeometryEditor::sync(MaterialDocument &doc, ModelDocument &preview) {
         bone_ = 0;
         transfer_for_ = -1;
         test_bone_ = false;
-        editable_ = {0};
+        editable_.clear();
         selected_.clear();
         elements_.clear();
     }
@@ -135,6 +136,9 @@ void GeometryEditor::sync(MaterialDocument &doc, ModelDocument &preview) {
             require(a.vertices.size() == b.vertices.size() && a.indices == b.indices,
                     "Native mesh order differs from the preview; this model cannot be edited yet");
         }
+        if (!same)
+            for (unsigned i = 0; i < model_->meshes.size(); ++i)
+                editable_.insert(i);
         std::erase_if(editable_, [&](auto m) {
             return m >= model_->meshes.size();
         });
@@ -286,6 +290,8 @@ void GeometryEditor::material_panel(MaterialDocument &doc, ModelDocument &previe
 void GeometryEditor::panel(MaterialDocument &doc, ModelDocument &preview,
                            EnvironmentRenderer &renderer, bool &playing, int &material) {
     sync(doc, preview);
+    if (doc.model.area >= 0 && !doc.model.project_asset)
+        ImGui::TextWrapped("Edits affect all placements using this model. Collision is edited separately.");
     if (!model_) {
         ImGui::TextWrapped("%s", error_.c_str());
         return;
@@ -388,7 +394,7 @@ void GeometryEditor::panel(MaterialDocument &doc, ModelDocument &preview,
             select_all(renderer);
         }
         ImGui::SameLine();
-        if (studio::TutorialWidgets::Button("geometry_editor", "Clear")) {
+        if (studio::TutorialWidgets::Button("geometry_editor", "Clear selection")) {
             elements_.clear();
             update_selection();
         }
@@ -396,12 +402,12 @@ void GeometryEditor::panel(MaterialDocument &doc, ModelDocument &preview,
         studio::TutorialWidgets::Checkbox("geometry_editor", "Box (B)", &box_tool_);
         studio::TutorialWidgets::Checkbox("geometry_editor", "X-ray selection", &through_);
         studio::TutorialWidgets::Checkbox("geometry_editor", "Triangle outlines", &wire_);
-        studio::TutorialWidgets::Checkbox("geometry_editor", "All visible mesh triangles",
-                                          &all_triangles_);
+        studio::TutorialWidgets::Checkbox("geometry_editor", "All visible meshes", &all_triangles_);
         if (studio::TutorialWidgets::Checkbox("geometry_editor", "Keep seams together", &seams_))
             update_selection();
-        ImGui::TextWrapped("Click to select; Ctrl adds or removes. Box selects a region. "
-                           "Shift-drag orbits; right drag pans.");
+        if (ImGui::CollapsingHeader("Controls"))
+            ImGui::TextWrapped("Click: select | Ctrl: add/remove | B: box\nMiddle drag: orbit | "
+                               "Shift+middle: pan | RMB+WASD: fly");
         if (studio::TutorialWidgets::Button("geometry_editor", "Isolate enabled"))
             for (unsigned i = 0; i < preview.scene->draws.size(); ++i)
                 renderer.set_draw_visible(i, editable_.contains(i));
@@ -418,12 +424,12 @@ void GeometryEditor::panel(MaterialDocument &doc, ModelDocument &preview,
                                    "handle to grow or shrink the radius.");
             }
             ImGui::SeparatorText("Transform selection");
-            studio::TutorialWidgets::RadioButton("geometry_editor", "Move", &mode_, 0);
+            studio::TutorialWidgets::RadioButton("geometry_editor", "Move (G)", &mode_, 0);
             ImGui::SameLine();
-            studio::TutorialWidgets::RadioButton("geometry_editor", "Rotate", &mode_, 1);
+            studio::TutorialWidgets::RadioButton("geometry_editor", "Rotate (R)", &mode_, 1);
             ImGui::SameLine();
-            studio::TutorialWidgets::RadioButton("geometry_editor", "Scale", &mode_, 2);
-            ImGui::TextWrapped("W / E / R choose handles. Ctrl snaps; Escape cancels.");
+            studio::TutorialWidgets::RadioButton("geometry_editor", "Scale (S)", &mode_, 2);
+            ImGui::TextWrapped("G / R / S: tool | Ctrl: snap | Esc: cancel");
             if (studio::TutorialWidgets::TreeNode("geometry_editor", "Numeric transform")) {
                 ImGui::TextUnformatted("Move");
                 ImGui::SetNextItemWidth(-1);
@@ -542,7 +548,7 @@ void GeometryEditor::panel(MaterialDocument &doc, ModelDocument &preview,
             ImGui::TextDisabled("Painting paused during bone test.");
         else if (paintable)
             ImGui::TextWrapped("Drag on the surface to paint. Ctrl paints toward zero. Strength "
-                               "applies per stroke; Escape cancels. Shift-drag orbits.");
+                               "applies per stroke; Escape cancels. Middle drag orbits.");
         else
             ImGui::TextWrapped(
                 "Enabled meshes have rigid or shared skin attributes. Use attachment controls "
@@ -616,12 +622,13 @@ bool GeometryEditor::viewport(MaterialDocument &doc, ModelDocument &preview,
             ++it;
     update_selection();
     bool editing = preview.motion < 0 && !test_scene_ && !editable_.empty();
-    if (input && editing && task_ != 1 && hovered && axis_ < 0 && !box_drag_ && !io.KeyCtrl) {
-        if (ImGui::IsKeyPressed(ImGuiKey_W))
+    if (input && editing && task_ != 1 && hovered && axis_ < 0 && !box_drag_ && !io.KeyCtrl &&
+        !viewport_navigating()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_G))
             mode_ = 0;
-        if (ImGui::IsKeyPressed(ImGuiKey_E))
-            mode_ = 1;
         if (ImGui::IsKeyPressed(ImGuiKey_R))
+            mode_ = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_S))
             mode_ = 2;
         if (ImGui::IsKeyPressed(ImGuiKey_B))
             box_tool_ = !box_tool_;
@@ -714,8 +721,14 @@ bool GeometryEditor::viewport(MaterialDocument &doc, ModelDocument &preview,
     auto screen = [&](MeshProjection p) {
         return ImVec2{origin.x + p.x * size.x, origin.y + p.y * size.y};
     };
-    auto pointer =
-        surface_.at((io.MousePos.x - origin.x) / size.x, (io.MousePos.y - origin.y) / size.y);
+    float pointer_x = (io.MousePos.x - origin.x) / size.x,
+          pointer_y = (io.MousePos.y - origin.y) / size.y;
+    auto exact_face = task_ != 1 ? surface_.pick_face(visible_model, pointer_x, pointer_y,
+                                                      editable_, culls, through_)
+                                 : std::optional<MeshSurfacePixel>{};
+    const auto *pointer = task_ == 1   ? surface_.at(pointer_x, pointer_y)
+                          : exact_face ? &*exact_face
+                                       : nullptr;
     int hovered_face =
         pointer && pointer->mesh >= 0 && editable_.contains(std::size_t(pointer->mesh))
             ? pointer->face
@@ -794,21 +807,53 @@ bool GeometryEditor::viewport(MaterialDocument &doc, ModelDocument &preview,
                        {origin.x + size.x, origin.y + size.y});
     }
     auto line = [&](MeshProjection a, MeshProjection b, ImU32 color, float thickness) {
-        if (!a.inverse_w || !b.inverse_w)
+        if (!a.inverse_w || !b.inverse_w || !std::isfinite(a.x) || !std::isfinite(a.y) ||
+            !std::isfinite(a.z) || !std::isfinite(b.x) || !std::isfinite(b.y) ||
+            !std::isfinite(b.z))
             return;
-        auto start = screen(a), end = screen(b);
+        double low = 0, high = 1;
+        auto clip = [&](double first, double last, double padding) {
+            double delta = last - first;
+            if (delta == 0)
+                return first >= -padding && first <= 1 + padding;
+            double enter = (-padding - first) / delta, leave = (1 + padding - first) / delta;
+            if (enter > leave)
+                std::swap(enter, leave);
+            low = std::max(low, enter);
+            high = std::min(high, leave);
+            return low <= high;
+        };
+        if (!clip(a.x, b.x, thickness / size.x) || !clip(a.y, b.y, thickness / size.y))
+            return;
+        auto interpolate = [&](double t) {
+            return MeshProjection{float(double(a.x) + (double(b.x) - a.x) * t),
+                                  float(double(a.y) + (double(b.y) - a.y) * t),
+                                  float(double(a.z) + (double(b.z) - a.z) * t), 1};
+        };
+        auto first = interpolate(low), last = interpolate(high);
+        auto start = screen(first), end = screen(last);
+        if (through_) {
+            draw->AddLine(start, end, color, thickness);
+            return;
+        }
         unsigned count =
             unsigned(std::clamp(std::hypot(end.x - start.x, end.y - start.y) / 4, 1.f, 400.f));
-        for (unsigned j = 0; j < count; ++j) {
+        int visible_start = -1;
+        for (unsigned j = 0; j <= count; ++j) {
             float t = (j + .5f) / count;
-            MeshProjection p{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t,
-                             1};
-            if (!through_ && !surface_.visible(p))
-                continue;
-            float low = float(j) / count, high = float(j + 1) / count;
-            draw->AddLine({start.x + (end.x - start.x) * low, start.y + (end.y - start.y) * low},
-                          {start.x + (end.x - start.x) * high, start.y + (end.y - start.y) * high},
-                          color, thickness);
+            MeshProjection p{first.x + (last.x - first.x) * t, first.y + (last.y - first.y) * t,
+                             first.z + (last.z - first.z) * t, 1};
+            bool visible = j < count && surface_.visible(p);
+            if (visible && visible_start < 0)
+                visible_start = int(j);
+            if (!visible && visible_start >= 0) {
+                float from = float(visible_start) / count, to = float(j) / count;
+                draw->AddLine(
+                    {start.x + (end.x - start.x) * from, start.y + (end.y - start.y) * from},
+                    {start.x + (end.x - start.x) * to, start.y + (end.y - start.y) * to}, color,
+                    thickness);
+                visible_start = -1;
+            }
         }
     };
     for (unsigned m = 0; m < model_->meshes.size(); ++m)
@@ -987,7 +1032,7 @@ bool GeometryEditor::viewport(MaterialDocument &doc, ModelDocument &preview,
                             }
                         }
                     }
-            if (!io.KeyCtrl)
+            if (!io.KeyCtrl || picked < 0)
                 elements_.clear();
             if (picked >= 0) {
                 auto &elements = elements_[picked_mesh];
@@ -1005,6 +1050,7 @@ bool GeometryEditor::viewport(MaterialDocument &doc, ModelDocument &preview,
         if (ImGui::IsMouseReleased(0) || !ImGui::IsMouseDown(0)) {
             if (!io.KeyCtrl)
                 elements_.clear();
+            bool picked_any = false;
             for (auto m : editable_)
                 if (renderer.draw_visible(m)) {
                     auto &mesh = model_->meshes[m];
@@ -1026,10 +1072,14 @@ bool GeometryEditor::viewport(MaterialDocument &doc, ModelDocument &preview,
                         p.inverse_w = valid ? 1.f : 0.f;
                         auto at = screen(p);
                         if (valid && at.x >= low.x && at.x <= high.x && at.y >= low.y &&
-                            at.y <= high.y && (through_ || surface_.visible(p)))
+                            at.y <= high.y && (through_ || surface_.visible(p))) {
                             elements_[m].insert(i);
+                            picked_any = true;
+                        }
                     }
                 }
+            if (!picked_any && std::hypot(high.x - low.x, high.y - low.y) < io.MouseDragThreshold)
+                elements_.clear();
             update_selection();
             box_drag_ = false;
             box_tool_ = false;

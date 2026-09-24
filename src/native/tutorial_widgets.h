@@ -1,14 +1,16 @@
 #pragma once
 #include <imgui.h>
+#include "native/undo_shortcuts.h"
 namespace studio::TutorialWidgets {
 using Observer = void (*)(const char *, const char *, bool);
 inline Observer observer = nullptr;
 inline void item(const char *module, const char *label, bool used = false) {
+    UndoShortcuts::observe(module, used);
     if (observer)
         observer(module, label, used);
 }
 inline bool Button(const char *module, const char *label, const ImVec2 &size = ImVec2(0, 0)) {
-    bool used = ImGui::Button(label, size);
+    bool used = UndoShortcuts::button(module, label, size);
     item(module, label, used);
     return used;
 }

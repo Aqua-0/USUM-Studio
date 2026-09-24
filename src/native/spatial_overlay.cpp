@@ -13,7 +13,9 @@ std::array<float, 4> tint(SpatialKind kind) {
         {.3f, 1, .45f, 1},    {1, .35f, .2f, 1},    {.15f, .65f, 1, 1}, {1, .35f, .85f, 1},
         {.85f, .6f, .25f, 1}, {.95f, .85f, .2f, 1}, {.2f, .85f, 1, 1},  {.8f, .45f, 1, 1},
         {.85f, 1, .8f, 1},    {.25f, .9f, 1, 1},    {1, .4f, .85f, 1},  {1, .65f, .2f, 1},
-        {.6f, .5f, 1, 1},     {1, .85f, .25f, 1},   {.15f, 1, .65f, 1}};
+        {.6f, .5f, 1, 1},     {1, .85f, .25f, 1},   {.15f, 1, .65f, 1},
+        {1,.5f,.2f,1}, {.9f,.3f,.6f,1}, {.2f,1,.8f,1}, {.7f,.4f,1,1},
+        {.2f,.65f,1,1}, {1,.8f,.4f,1}, {.7f,.8f,1,1}, {.8f,.65f,.4f,1}, {.5f,1,.5f,1}};
     static_assert(std::size(colors) == unsigned(SpatialKind::Count));
     return colors[unsigned(kind)];
 }
@@ -173,8 +175,8 @@ void SpatialOverlay::render(bgfx::ViewId view, bool picking, unsigned first_id) 
             bgfx::submit(view, program_);
         }
     }
-    if (!picking && !interaction_guides_.empty() && selected >= 0 &&
-        std::size_t(selected) < scene_->spatial.regions.size() &&
+    if (!picking && interaction_guide_selection_ == selected && !interaction_guides_.empty() &&
+        selected >= 0 && std::size_t(selected) < scene_->spatial.regions.size() &&
         enabled[unsigned(scene_->spatial.regions[selected].kind)]) {
         auto count = narrow(interaction_guides_.size());
         if (bgfx::getAvailTransientVertexBuffer(count, layout_) >= count) {
@@ -254,60 +256,64 @@ void SpatialOverlay::camera_guides(const CameraSetting &setting, const CameraSet
         frustum(setting.position, target, rolled_right, rolled_up, setting.hold_fov);
     }
 }
-bool SpatialOverlay::controls(ViewportCamera &camera, int loaded_zone) {
-    if (focus)
-        ImGui::SetNextWindowFocus();
-    ImGui::Begin("Spatial");
+bool SpatialOverlay::controls(ViewportCamera &camera, int loaded_zone, bool details) {
+    ImGui::Begin(details ? "Map inspector" : "Map browser");
     bool changed = false;
-    ImGui::TextUnformatted("Visible map layers");
-    if (studio::TutorialWidgets::Button("spatial_overlay", "Show interactions")) {
-        enabled.fill(false);
-        for (unsigned i = unsigned(SpatialKind::Entrance); i < enabled.size(); ++i)
-            enabled[i] = true;
-        pick_overlays = true;
-        changed = true;
-    }
-    ImGui::SameLine();
-    if (studio::TutorialWidgets::Button("spatial_overlay", "Hide all")) {
-        enabled.fill(false);
-        changed = true;
-    }
-    ImGui::TextDisabled("Ctrl+click an unlocked region to inspect it.");
-    if (studio::TutorialWidgets::CollapsingHeader("spatial_overlay", "Choose layers") &&
-        ImGui::BeginTable("Layer visibility", 2, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Layer", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Selection", ImGuiTableColumnFlags_WidthFixed, 60);
-        for (unsigned i = 0; i < enabled.size(); ++i) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            auto color = tint(SpatialKind(i));
-            ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(color[0], color[1], color[2], 1));
-            changed |= studio::TutorialWidgets::Checkbox(
-                "spatial_overlay", spatial_kind_name(SpatialKind(i)), &enabled[i]);
-            ImGui::PopStyleColor();
-            ImGui::TableNextColumn();
-            ImGui::PushID(int(i));
-            changed |= studio::TutorialWidgets::Checkbox("spatial_overlay", "Lock", &locked[i]);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Keep this layer visible without selecting it in the viewport.");
-            ImGui::PopID();
+    if (!details) {
+        ImGui::TextUnformatted("Visible map layers");
+        if (studio::TutorialWidgets::Button("spatial_overlay", "Show interactions")) {
+            enabled.fill(false);
+            for (unsigned i = unsigned(SpatialKind::Entrance); i < enabled.size(); ++i)
+                enabled[i] = true;
+            pick_overlays = true;
+            changed = true;
         }
-        ImGui::EndTable();
-    }
-    if (studio::TutorialWidgets::CollapsingHeader("spatial_overlay", "Display & selection")) {
-        changed |=
-            studio::TutorialWidgets::Checkbox("spatial_overlay", "See through geometry", &xray);
-        changed |= studio::TutorialWidgets::Checkbox("spatial_overlay", "Filled regions", &filled);
-        changed |= studio::TutorialWidgets::Checkbox(
-            "spatial_overlay", "Collision attribute colors", &attribute_colors);
-        if (filled)
-            changed |= ImGui::SliderFloat("Opacity", &opacity, .03f, .6f, "%.2f");
-        changed |= studio::TutorialWidgets::Checkbox(
-            "spatial_overlay", "Include overlays in Ctrl+click selection", &pick_overlays);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Select visible, unlocked regions or the model under the cursor.");
-        studio::TutorialWidgets::Checkbox("spatial_overlay", "Selected region only",
-                                          &selected_only);
+        ImGui::SameLine();
+        if (studio::TutorialWidgets::Button("spatial_overlay", "Hide all")) {
+            enabled.fill(false);
+            changed = true;
+        }
+
+        if (ImGui::BeginTable("Layer visibility", 2, ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Layer", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Lock", ImGuiTableColumnFlags_WidthFixed, 36.f);
+            ImGui::TableHeadersRow();
+            for (unsigned i = 0; i < enabled.size(); ++i) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                auto color = tint(SpatialKind(i));
+                ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(color[0], color[1], color[2], 1));
+                changed |= studio::TutorialWidgets::Checkbox(
+                    "spatial_overlay", spatial_kind_name(SpatialKind(i)), &enabled[i]);
+                ImGui::PopStyleColor();
+                ImGui::TableNextColumn();
+                ImGui::PushID(int(i));
+                changed |=
+                    studio::TutorialWidgets::Checkbox("spatial_overlay", "##Lock", &locked[i]);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Lock selection: keep this layer visible without selecting "
+                                      "it in the viewport.");
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        if (studio::TutorialWidgets::CollapsingHeader("spatial_overlay", "Display & selection")) {
+            changed |=
+                studio::TutorialWidgets::Checkbox("spatial_overlay", "See through geometry", &xray);
+            changed |=
+                studio::TutorialWidgets::Checkbox("spatial_overlay", "Filled regions", &filled);
+            changed |= studio::TutorialWidgets::Checkbox(
+                "spatial_overlay", "Collision attribute colors", &attribute_colors);
+            if (filled)
+                changed |= ImGui::SliderFloat("Opacity", &opacity, .03f, .6f, "%.2f");
+            changed |= studio::TutorialWidgets::Checkbox(
+                "spatial_overlay", "Select visible regions in viewport", &pick_overlays);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Select visible, unlocked regions or the model under the cursor.");
+            studio::TutorialWidgets::Checkbox("spatial_overlay", "Selected region only",
+                                              &selected_only);
+        }
     }
     if (!scene_) {
         ImGui::TextWrapped(
@@ -328,7 +334,7 @@ bool SpatialOverlay::controls(ViewportCamera &camera, int loaded_zone) {
             zone = &z;
     bool camera_layer =
         enabled[unsigned(SpatialKind::Camera)] || enabled[unsigned(SpatialKind::ScrollStop)];
-    if (camera_layer &&
+    if (details && camera_layer &&
         ImGui::BeginCombo("Camera zone", zone ? std::to_string(zone_).c_str() : "Unavailable")) {
         for (auto &z : data.zones) {
             std::string label = "Zone " + std::to_string(z.zone);
@@ -347,73 +353,79 @@ bool SpatialOverlay::controls(ViewportCamera &camera, int loaded_zone) {
     }
     const CameraSetting *defaults =
         zone && zone->camera < data.defaults.size() ? &data.defaults[zone->camera] : nullptr;
-    if (camera_layer && zone)
+    if (details && camera_layer && zone)
         ImGui::TextDisabled("Default camera %u | support %u", zone->camera, zone->support);
     if (focus) {
         search_[0] = 0;
         kind_filter_ = 0;
     }
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##spatial-search", "Search regions or attribute IDs", search_,
-                             sizeof(search_));
-    if (ImGui::BeginCombo("List", kind_filter_ ? spatial_kind_name(SpatialKind(kind_filter_ - 1))
-                                               : "All types")) {
-        if (ImGui::Selectable("All types", !kind_filter_))
-            kind_filter_ = 0;
-        for (unsigned i = 0; i < enabled.size(); ++i)
-            if (ImGui::Selectable(spatial_kind_name(SpatialKind(i)), kind_filter_ == int(i) + 1))
-                kind_filter_ = int(i) + 1;
-        ImGui::EndCombo();
-    }
-    auto query = lower(search_);
-    std::vector<int> matches;
-    for (unsigned i = 0; i < data.regions.size(); ++i) {
-        auto &r = data.regions[i];
-        if ((r.kind != SpatialKind::Encounter || !r.vertices.empty()) &&
-            enabled[unsigned(r.kind)] &&
-            (!kind_filter_ || unsigned(r.kind) == unsigned(kind_filter_ - 1)) &&
-            (query.empty() || lower(r.name).find(query) != std::string::npos))
-            matches.push_back(int(i));
-    }
-    std::stable_sort(matches.begin(), matches.end(), [&](int a, int b) {
-        auto &x = data.regions[a];
-        auto &y = data.regions[b];
-        if (x.kind != y.kind)
-            return x.kind < y.kind;
-        if (x.attribute != y.attribute)
-            return x.attribute < y.attribute;
-        return x.name < y.name;
-    });
-    ImGui::TextDisabled("%zu enabled / %zu regions", matches.size(), data.regions.size());
-    ImGui::BeginChild("Regions", ImVec2(0, 180), ImGuiChildFlags_Borders);
-    ImGuiListClipper clipper;
-    clipper.Begin(int(matches.size()));
-    if (focus) {
-        auto it = std::find(matches.begin(), matches.end(), selected);
-        if (it != matches.end())
-            clipper.IncludeItemByIndex(int(it - matches.begin()));
-    }
-    while (clipper.Step())
-        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-            int i = matches[row];
-            auto &r = data.regions[i];
-            ImGui::PushID(i);
-            if (ImGui::Selectable(r.name.c_str(), selected == i)) {
-                selected = i;
-                if (r.kind == SpatialKind::Zone && r.zone >= 0)
-                    zone_ = r.zone;
-                enabled[unsigned(r.kind)] = true;
-                changed = true;
-            }
-            if (focus && selected == i)
-                ImGui::SetScrollHereY();
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", spatial_kind_name(r.kind));
-            ImGui::PopID();
+    if (!details) {
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##spatial-search", "Search regions or attribute IDs", search_,
+                                 sizeof(search_));
+        if (ImGui::BeginCombo("List", kind_filter_
+                                          ? spatial_kind_name(SpatialKind(kind_filter_ - 1))
+                                          : "All types")) {
+            if (ImGui::Selectable("All types", !kind_filter_))
+                kind_filter_ = 0;
+            for (unsigned i = 0; i < enabled.size(); ++i)
+                if (ImGui::Selectable(spatial_kind_name(SpatialKind(i)),
+                                      kind_filter_ == int(i) + 1))
+                    kind_filter_ = int(i) + 1;
+            ImGui::EndCombo();
         }
-    ImGui::EndChild();
-    if (matches.empty())
-        ImGui::TextWrapped("Enable a layer above, or clear the list filters.");
+        auto query = lower(search_);
+        std::vector<int> matches;
+        for (unsigned i = 0; i < data.regions.size(); ++i) {
+            auto &r = data.regions[i];
+            if ((r.kind != SpatialKind::Encounter || !r.vertices.empty()) &&
+                enabled[unsigned(r.kind)] &&
+                (!kind_filter_ || unsigned(r.kind) == unsigned(kind_filter_ - 1)) &&
+                (query.empty() || lower(r.name).find(query) != std::string::npos))
+                matches.push_back(int(i));
+        }
+        std::stable_sort(matches.begin(), matches.end(), [&](int a, int b) {
+            auto &x = data.regions[a];
+            auto &y = data.regions[b];
+            if (x.kind != y.kind)
+                return x.kind < y.kind;
+            if (x.attribute != y.attribute)
+                return x.attribute < y.attribute;
+            return x.name < y.name;
+        });
+        ImGui::TextDisabled("%zu enabled / %zu regions", matches.size(), data.regions.size());
+        ImGui::BeginChild("Regions", ImVec2(0, 180), ImGuiChildFlags_Borders);
+        ImGuiListClipper clipper;
+        clipper.Begin(int(matches.size()));
+        if (focus) {
+            auto it = std::find(matches.begin(), matches.end(), selected);
+            if (it != matches.end())
+                clipper.IncludeItemByIndex(int(it - matches.begin()));
+        }
+        while (clipper.Step())
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                int i = matches[row];
+                auto &r = data.regions[i];
+                ImGui::PushID(i);
+                if (ImGui::Selectable(r.name.c_str(), selected == i)) {
+                    selected = i;
+                    if (r.kind == SpatialKind::Zone && r.zone >= 0)
+                        zone_ = r.zone;
+                    enabled[unsigned(r.kind)] = true;
+                    changed = true;
+                }
+                if (focus && selected == i)
+                    ImGui::SetScrollHereY();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", spatial_kind_name(r.kind));
+                ImGui::PopID();
+            }
+        ImGui::EndChild();
+        if (matches.empty())
+            ImGui::TextWrapped("Enable a layer above, or clear the list filters.");
+        ImGui::End();
+        return changed;
+    }
     focus = false;
     const SpatialRegion *region = selected >= 0 && std::size_t(selected) < data.regions.size()
                                       ? &data.regions[selected]
@@ -454,6 +466,7 @@ bool SpatialOverlay::controls(ViewportCamera &camera, int loaded_zone) {
         }
     }
     interaction_guides_.clear();
+    interaction_guide_selection_ = selected;
     if (region && region->overworld) {
         auto &r = *region->overworld;
         ImGui::SeparatorText("Interaction details");

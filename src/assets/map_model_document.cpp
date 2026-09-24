@@ -8,14 +8,52 @@ namespace studio {
 ModelDocument reload_map_model(const ModelDocument &source,
                                const std::map<std::size_t, Bytes> &members) {
     auto result = source;
-    const auto &model_link = result.resources.at(result.material_resources.front());
-    const auto archive = result.sources.at(model_link.source).archive;
+    const auto original_link = result.resources.at(result.material_resources.front());
+    const auto archive = result.sources.at(original_link.source).archive;
     for (auto &member : result.sources)
         if (member.archive == archive)
             if (auto replacement = members.find(member.member); replacement != members.end()) {
                 member.original = replacement->second;
                 member.hash = sha256(member.original);
             }
+    if (source.project_asset) {
+        const auto object = Container::parse(result.sources.at(0).original, "SM");
+        const auto pack = ModelPack::parse(object.files.at(1));
+        result.resources.clear();
+        result.texture_resources.clear();
+        result.material_resources.clear();
+        result.motions.clear();
+        for (std::size_t i = 0; i < pack.resources.size(); ++i) {
+            const auto &r = pack.resources[i];
+            const auto index = result.resources.size();
+            result.resources.push_back({0,
+                                        {1, i},
+                                        r.category == 0                      ? "Model"
+                                        : r.category == 1                    ? "Texture"
+                                        : r.category == 3 || r.category == 4 ? "Shader"
+                                                                             : "Auxiliary",
+                                        r.name});
+            if (r.category == 0 && r.name == original_link.name)
+                result.material_resources.push_back(index);
+            if (r.category == 1)
+                result.texture_resources[result.texture_prefix + text(slice(r.bytes, 40, 64))] =
+                    index;
+        }
+        require(result.material_resources.size() == 1,
+                "The project asset model is missing or ambiguous");
+        for (unsigned slot :
+             {TargetProfile::static_loop_motion, TargetProfile::static_daily_motion}) {
+            if (object.files.at(slot).empty())
+                continue;
+            AssetMotion motion;
+            motion.name = slot == TargetProfile::static_daily_motion ? "Daily motion" : "Area loop";
+            motion.daily = slot == TargetProfile::static_daily_motion;
+            motion.resource = result.resources.size();
+            result.resources.push_back({0, {slot}, "Motion", motion.name});
+            result.motions.push_back(motion);
+        }
+    }
+    const auto &model_link = result.resources.at(result.material_resources.front());
     ModelDecoder decoder;
     decoder.keep_skeleton = true;
     decoder.out.textures = source.scene->textures;
@@ -293,6 +331,26 @@ ModelDocument isolate_map_model(const Environment &scene, int selected,
     for (auto &animation : scene.visibility_animations)
         if (animation.scope == doc.texture_prefix)
             out.visibility_animations.push_back(animation);
+    ModelDecoder native_order;
+    native_order.model(asset_resource(doc.sources[0].original, source->path), doc.name,
+                       doc.texture_prefix);
+    std::vector<SceneDraw> ordered;
+    std::vector<bool> used(out.draws.size());
+    for (const auto &native : native_order.out.draws) {
+        auto material = native_order.out.materials.at(native.material).name;
+        for (std::size_t i = 0; i < out.draws.size(); ++i) {
+            const auto &draw = out.draws[i];
+            if (!used[i] && draw.mesh == native.mesh && draw.indices == native.indices &&
+                draw.vertices.size() == native.vertices.size() &&
+                out.materials.at(draw.material).name == material) {
+                ordered.push_back(draw);
+                used[i] = true;
+                break;
+            }
+        }
+    }
+    require(ordered.size() == out.draws.size(), "Map model meshes could not be matched to their native order");
+    out.draws = std::move(ordered);
     out.diagnostics.push_back("Edits affect all placements using this resource.");
     return doc;
 }

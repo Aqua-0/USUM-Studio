@@ -30,6 +30,24 @@ class ProjectWorkspace {
     bool close();
 
   private:
+    struct SourceVerificationProgress {
+        std::mutex mutex;
+        std::size_t completed = 0, total = 0;
+        std::string file;
+    };
+    std::shared_ptr<SourceVerificationProgress> source_progress_ =
+        std::make_shared<SourceVerificationProgress>();
+    std::future<ProjectStore> source_task_;
+    int source_action_ = 0;
+    bool trust_legacy_source_ = false;
+    SourceProgress source_progress_callback();
+    bool external_open_ = false, external_copy_ = false, external_closed_ = false;
+    char external_directory_[4096]{};
+    std::optional<ExternalEditReview> external_review_;
+    std::future<ExternalEditReview> external_scan_;
+    std::future<ProjectStore> external_import_;
+    std::string external_status_;
+    void draw_external_editing();
     bool map_dialog_ = false, map_inherited_ = false;
     int map_template_ = -1, map_entrance_ = -1;
     char map_name_[161] = "New map";
@@ -44,7 +62,8 @@ class ProjectWorkspace {
     std::future<ProjectBuildResult> stage_;
     std::future<void> export_;
     bool busy() const {
-        return stage_.valid() || export_.valid();
+        return stage_.valid() || export_.valid() || external_scan_.valid() ||
+               external_import_.valid() || source_task_.valid();
     }
     std::shared_ptr<FolderSelection> picker_ = std::make_shared<FolderSelection>();
     int picking_ = 0;

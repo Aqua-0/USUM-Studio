@@ -320,7 +320,7 @@ std::vector<LightingContext> load_area_lighting(const std::filesystem::path &dum
         slice(h, begin, end - begin);
         bool matched = false;
         for (auto p = begin; p < end; p += 4)
-            if (u16(h, p) == u16(z, 10) && u16(h, p + 2) == area)
+            if (u16(h, p) == zone && u16(h, p + 2) == area)
                 matched = true;
         if (!matched)
             continue;

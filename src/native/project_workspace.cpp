@@ -54,6 +54,7 @@ std::string storage_report(const ProjectStore &store) {
 ProjectWorkspace::ProjectWorkspace(SDL_Window *window, Preferences &prefs,
                                    const std::string &directory, bool required)
     : window_(window), preferences_(prefs), required_(required) {
+    std::snprintf(directory_, sizeof(directory_), "%s", directory.c_str());
     if (!directory.empty())
         try {
             store_ = ProjectStore::open(std::filesystem::u8path(directory));
@@ -122,7 +123,7 @@ void ProjectWorkspace::stage() {
     save();
     auto build = store_->build();
     stage_ = std::async(std::launch::async, [build] {
-        return ProjectStore::stage(build, export_project_edit);
+        return stage_editor_project(build);
     });
     notice_ = "Staging changed members...";
 }
@@ -141,6 +142,20 @@ void ProjectWorkspace::choose(int which) {
     picking_ = which;
     choose_folder(window_, picker_, nullptr);
 }
+SourceProgress ProjectWorkspace::source_progress_callback() {
+    auto state = source_progress_;
+    {
+        std::lock_guard lock(state->mutex);
+        state->completed = state->total = 0;
+        state->file.clear();
+    }
+    return [state](std::size_t completed, std::size_t total, const std::string &file) {
+        std::lock_guard lock(state->mutex);
+        state->completed = completed;
+        state->total = total;
+        state->file = file;
+    };
+}
 void ProjectWorkspace::update() {
     try {
         {
@@ -156,7 +171,11 @@ void ProjectWorkspace::update() {
                         require(std::all_of(store_->edits.begin(), store_->edits.end(),
                                             [](const auto &edit) {
                                                 return edit.second.kind == "composition" ||
-                                                       edit.second.kind == "field-map-created";
+                                                       edit.second.kind == "field-map-created" ||
+                                                       edit.second.kind ==
+                                                           "character-registration-created" ||
+                                                       (edit.second.kind == "asset-library" ||
+                                                        edit.second.kind == "studio-asset");
                                             }),
                                 "Reload staged assets before importing a source archive");
                         auto selected = std::filesystem::u8path(picker_->path);
@@ -171,11 +190,37 @@ void ProjectWorkspace::update() {
                         restart_ = true;
                         return;
                     }
-                    auto &buffer = picking_ == 2 ? dump_ : directory_;
+                    auto &buffer = picking_ == 4   ? external_directory_
+                                   : picking_ == 2 ? dump_
+                                                   : directory_;
                     require(picker_->path.size() < 4096, "Selected directory is too long");
                     std::snprintf(buffer, 4096, "%s", picker_->path.c_str());
                 }
             }
+        }
+        if (source_task_.valid() &&
+            source_task_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            auto result = source_task_.get();
+            if (source_action_ <= 1) {
+                remember(result.root);
+                restart_ = true;
+                return;
+            }
+            notice_ = source_action_ == 2 ? "Source verification upgraded to SHA-256"
+                                          : "Original dump content verified";
+            error_.clear();
+        }
+        if (external_scan_.valid() &&
+            external_scan_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            external_review_ = external_scan_.get();
+            external_status_ = "Review complete";
+        }
+        if (external_import_.valid() &&
+            external_import_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            *store_ = external_import_.get();
+            external_review_.reset();
+            restart_ = true;
+            return;
         }
         if (export_.valid() &&
             export_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -201,13 +246,16 @@ void ProjectWorkspace::update() {
                     restart_ = true;
                     break;
                 }
-            if (reload_after_stage_ && !restart_) {
+            if (!restart_ &&
+                (reload_after_stage_ || preferences_.get("project.reload_after_stage") == "1")) {
                 save_editor_project();
-                require(!store_->unstaged(),
-                        "Edits changed during staging. Apply again before reloading.");
-                store_->advance();
+                if (store_->unstaged()) {
+                    notice_ += "\nNew edits arrived during staging. Stage again to reload them.";
+                } else if (reload_after_stage_ || store_->base != store_->current_overlay) {
+                    store_->advance();
+                    restart_ = true;
+                }
                 reload_after_stage_ = false;
-                restart_ = true;
             }
         }
         if (store_ && !restart_) {
@@ -217,7 +265,7 @@ void ProjectWorkspace::update() {
                 std::all_of(bindings.begin(), bindings.end(), [](const auto *binding) {
                     return binding->ready_for_autosave();
                 });
-            if (automatic_ready && store_->settings.autosave &&
+            if (automatic_ready && !busy() && store_->settings.autosave &&
                 now - saved_ >= std::chrono::seconds(store_->settings.save_seconds)) {
                 saved_ = now;
                 save_editor_project();
@@ -277,7 +325,8 @@ void ProjectWorkspace::menu(int area) {
                                                   "Changes, history and settings..."))
                 manager_ = true;
             if (studio::TutorialWidgets::MenuItem("project_workspace", "Reload staged assets",
-                                                  nullptr, false, !busy() && !store_->unstaged()))
+                                                  "Ctrl+Shift+R", false,
+                                                  !busy() && !store_->unstaged()))
                 reload();
             if (studio::TutorialWidgets::MenuItem("project_workspace", "Open project folder"))
                 SDL_OpenURL(("file:///" + store_->root.generic_string()).c_str());
@@ -289,6 +338,14 @@ void ProjectWorkspace::menu(int area) {
                     "project_workspace", "Open exports folder", nullptr, false,
                     std::filesystem::exists(store_->overlay_directory())))
                 SDL_OpenURL(("file:///" + store_->overlay_directory().generic_string()).c_str());
+            if (TutorialWidgets::MenuItem("project_workspace", "External editing (pk3DS)...",
+                                          nullptr, false, !busy())) {
+                const auto connection = store_->external_connection();
+                std::snprintf(external_directory_, sizeof(external_directory_), "%s",
+                              connection.directory.string().c_str());
+                external_open_ = true;
+                external_copy_ = false;
+            }
             if (ImGui::BeginMenu("Import source archive", !busy())) {
                 auto import = [&](const char *label, const char *relative) {
                     if (studio::TutorialWidgets::MenuItem("project_import", label)) {
@@ -342,6 +399,177 @@ void ProjectWorkspace::menu(int area) {
         manager_ = true;
     }
 }
+void ProjectWorkspace::draw_external_editing() {
+    if (!external_open_ || !store_)
+        return;
+    ImGui::SetNextWindowSize({850, 620}, ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("External editing", &external_open_)) {
+        ImGui::End();
+        return;
+    }
+    ImGui::TextWrapped("Use a separate dump for pk3DS. Never edit Studio's original dump.");
+    ImGui::BeginDisabled(busy());
+    if (TutorialWidgets::RadioButton("project_workspace", "Connect existing dump", !external_copy_))
+        external_copy_ = false;
+    ImGui::SameLine();
+    if (TutorialWidgets::RadioButton("project_workspace", "Create full working copy",
+                                     external_copy_))
+        external_copy_ = true;
+    ImGui::InputText("Dump folder", external_directory_, sizeof(external_directory_));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...##external"))
+        choose(4);
+    if (external_copy_)
+        ImGui::TextWrapped(
+            "Copies the full original dump and applies staged changes. Allow roughly "
+            "4 GB of extra space, depending on your dump. Choose a new or empty folder.");
+    else
+        ImGui::TextWrapped("Connecting does not write to this dump. The first review compares it "
+                           "with the project's original dump, including any older external edits.");
+    ImGui::TextWrapped("Close the pk3DS editor window to finish its saves before scanning. "
+                       "Save, stage and reload Studio changes first.");
+    auto scan = [&](bool setup) {
+        save();
+        require(!store_->unstaged() &&
+                    (store_->current_overlay.empty() || store_->base == store_->current_overlay),
+                "Stage and reload project changes before external editing.");
+        auto copy = *store_;
+        const auto directory = std::filesystem::u8path(external_directory_);
+        require(!setup || !directory.empty(), "Choose an external dump folder");
+        external_review_.reset();
+        external_status_ = setup && external_copy_ ? "Creating external working copy..."
+                                                   : "Comparing external changes...";
+        external_scan_ = std::async(std::launch::async, [copy = std::move(copy), setup, directory,
+                                                         create = external_copy_]() mutable {
+            if (setup)
+                copy.connect_external(directory, create);
+            return copy.scan_external();
+        });
+        error_.clear();
+    };
+    try {
+        if (TutorialWidgets::Button("project_workspace", external_copy_ ? "Create copy and connect"
+                                                                        : "Connect and review"))
+            scan(true);
+        ImGui::SameLine();
+        if (TutorialWidgets::Button("project_workspace", "Scan connected dump"))
+            scan(false);
+        const auto connection = store_->external_connection();
+        if (!connection.directory.empty()) {
+            ImGui::TextWrapped("Connected: %s", connection.directory.string().c_str());
+            if (TutorialWidgets::Button("project_workspace", "Open external folder"))
+                SDL_OpenURL(("file:///" + connection.directory.generic_string()).c_str());
+        }
+        ImGui::SeparatorText("Send Studio changes to pk3DS");
+        ImGui::TextWrapped(
+            "Updates only changed files in the connected dump using staged Studio versions. "
+            "Review external edits first. Close pk3DS completely so cached data cannot overwrite "
+            "them.");
+        TutorialWidgets::Checkbox("project_workspace", "pk3DS is closed", &external_closed_);
+        ImGui::BeginDisabled(!external_closed_ || connection.directory.empty());
+        const bool send_external =
+            TutorialWidgets::Button("project_workspace", "Send staged changes to external dump");
+        ImGui::EndDisabled();
+        if (send_external) {
+            save();
+            require(!store_->unstaged(), "Stage Studio changes before sending them.");
+            auto copy = *store_;
+            external_review_.reset();
+            external_status_ = "Updating external dump...";
+            external_scan_ = std::async(std::launch::async, [copy = std::move(copy)]() mutable {
+                copy.update_external();
+                return copy.scan_external();
+            });
+            external_closed_ = false;
+            error_.clear();
+        }
+        if (external_review_) {
+            auto &review = *external_review_;
+            ImGui::SeparatorText("Review changes");
+            ImGui::Text("%zu changed resources", review.changes.size());
+            if (!review.notes.empty()) {
+                ImGui::TextWrapped("%zu files skipped. The review is incomplete.",
+                                   review.notes.size());
+                if (ImGui::CollapsingHeader("Skipped files / limitations",
+                                            ImGuiTreeNodeFlags_DefaultOpen))
+                    for (const auto &note : review.notes)
+                        ImGui::TextWrapped("%s", note.c_str());
+            }
+            ImGui::TextWrapped(
+                "Only imported resources replace project data. Keep project acknowledges "
+                "the external version without applying it; Decide later leaves it pending.");
+            if (TutorialWidgets::Button("project_workspace", "Import non-conflicting"))
+                for (auto &change : review.changes)
+                    if (!change.conflict)
+                        change.choice = 0;
+            ImGui::SameLine();
+            if (TutorialWidgets::Button("project_workspace", "Keep project for all"))
+                for (auto &change : review.changes)
+                    change.choice = 1;
+            ImGui::BeginChild("External resources", {0, 230}, ImGuiChildFlags_Borders);
+            for (unsigned i = 0; i < review.changes.size(); ++i) {
+                auto &change = review.changes[i];
+                ImGui::PushID(int(i));
+                ImGui::TextWrapped("%s%s", change.conflict ? "Conflict: " : "",
+                                   GameProfile::external_resource_name(change.incoming.path));
+                ImGui::TextDisabled("%s", change.incoming.path.c_str());
+                if (change.incoming.member >= 0) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("member %d / subfile %d", change.incoming.member,
+                                        change.incoming.subfile);
+                }
+                ImGui::SetNextItemWidth(180);
+                if (ImGui::Combo("##choice", &change.choice,
+                                 "Import\0Keep project\0Decide later\0")) {
+                    const auto &path = change.incoming.path;
+                    if (path == TargetProfile::trainer_records_archive ||
+                        path == TargetProfile::trainer_teams_archive)
+                        for (auto &other : review.changes)
+                            if ((other.incoming.path == TargetProfile::trainer_records_archive ||
+                                 other.incoming.path == TargetProfile::trainer_teams_archive) &&
+                                other.incoming.member == change.incoming.member &&
+                                other.incoming.subfile == change.incoming.subfile)
+                                other.choice = change.choice;
+                }
+                TutorialWidgets::item("project_workspace", "External change choice");
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+            const bool unresolved =
+                std::any_of(review.changes.begin(), review.changes.end(), [](const auto &change) {
+                    return change.conflict && change.choice == 2;
+                });
+            const bool selected =
+                std::any_of(review.changes.begin(), review.changes.end(), [](const auto &change) {
+                    return change.choice != 2;
+                });
+            ImGui::BeginDisabled(unresolved || !selected);
+            const bool apply_external =
+                TutorialWidgets::Button("project_workspace", "Apply choices and reload Studio");
+            ImGui::EndDisabled();
+            if (apply_external) {
+                save();
+                auto copy = *store_;
+                external_status_ = "Importing external changes...";
+                external_import_ =
+                    std::async(std::launch::async, [copy = std::move(copy), review]() mutable {
+                        copy.import_external(review);
+                        return copy;
+                    });
+                error_.clear();
+            }
+            if (unresolved)
+                ImGui::TextWrapped("Choose Import or Keep project for each conflict.");
+        }
+    } catch (const std::exception &e) {
+        error_ = project_error(e);
+    }
+    ImGui::EndDisabled();
+    if (!error_.empty())
+        ImGui::TextWrapped("%s", error_.c_str());
+    ImGui::End();
+}
+
 void ProjectWorkspace::draw_map_creation() {
     if (!map_dialog_ || !store_)
         return;
@@ -471,6 +699,7 @@ void ProjectWorkspace::draw_map_creation() {
 }
 void ProjectWorkspace::draw() {
     draw_map_creation();
+    draw_external_editing();
     auto &io = ImGui::GetIO();
     if (store_ && io.KeyCtrl && io.KeyShift && !io.KeyAlt)
         try {
@@ -480,6 +709,8 @@ void ProjectWorkspace::draw() {
                 stage();
             if (ImGui::IsKeyPressed(ImGuiKey_B, false))
                 build_game_export();
+            if (ImGui::IsKeyPressed(ImGuiKey_R, false) && !busy() && !store_->unstaged())
+                reload();
         } catch (const std::exception &e) {
             error_ = project_error(e);
             manager_ = true;
@@ -493,9 +724,22 @@ void ProjectWorkspace::draw() {
         if (!busy())
             ImGui::CloseCurrentPopup();
         else {
-            ImGui::TextUnformatted(export_.valid() ? "Building game export..."
-                                                   : "Staging project...");
-            ImGui::ProgressBar(-float(ImGui::GetTime()) - 1.f, {320, 0}, "");
+            if (source_task_.valid()) {
+                std::lock_guard lock(source_progress_->mutex);
+                ImGui::TextUnformatted(source_action_ == 0 ? "Hashing original dump..."
+                                                           : "Verifying original dump...");
+                const auto &state = *source_progress_;
+                ImGui::ProgressBar(state.total ? float(state.completed) / float(state.total) : 0.f,
+                                   {420, 0});
+                ImGui::Text("%zu / %zu files", state.completed, state.total);
+                ImGui::TextUnformatted(state.file.c_str());
+            } else {
+                ImGui::TextUnformatted(external_scan_.valid() || external_import_.valid()
+                                           ? external_status_.c_str()
+                                       : export_.valid() ? "Building game export..."
+                                                         : "Staging project...");
+                ImGui::ProgressBar(-float(ImGui::GetTime()) - 1.f, {320, 0}, "");
+            }
         }
         ImGui::EndPopup();
     }
@@ -521,6 +765,16 @@ void ProjectWorkspace::draw() {
                 choose(2);
             ImGui::TextWrapped("Choose an empty project folder and a game dump containing romfs.");
         }
+        if (!creating_) {
+            TutorialWidgets::Checkbox("project_workspace",
+                                      "Trust current original dump and upgrade legacy verification",
+                                      &trust_legacy_source_);
+            if (trust_legacy_source_)
+                ImGui::TextWrapped("Only for older projects without content hashes. Confirm that "
+                                   "the original dump is intact: "
+                                   "its current contents will become the trusted baseline, even if "
+                                   "timestamps changed.");
+        }
         if (studio::TutorialWidgets::Button("project_workspace",
                                             creating_ ? "Create Project" : "Open Project"))
             try {
@@ -533,11 +787,23 @@ void ProjectWorkspace::draw() {
                             require(!binding->pending(), "Save existing edit documents before "
                                                          "creating a project from inspection mode");
                     save_editor_project();
-                    auto created = ProjectStore::create(std::filesystem::u8path(directory_),
-                                                        std::filesystem::u8path(dump_));
-                    switch_to(created.root);
-                } else
-                    switch_to(std::filesystem::u8path(directory_));
+                    source_action_ = 0;
+                    source_task_ = std::async(
+                        std::launch::async, [directory = std::filesystem::u8path(directory_),
+                                             dump = std::filesystem::u8path(dump_),
+                                             progress = source_progress_callback()] {
+                            return ProjectStore::create(directory, dump, progress);
+                        });
+                } else {
+                    save_editor_project();
+                    source_action_ = 1;
+                    source_task_ = std::async(
+                        std::launch::async,
+                        [directory = std::filesystem::u8path(directory_),
+                         trust = trust_legacy_source_, progress = source_progress_callback()] {
+                            return ProjectStore::open(directory, trust, progress);
+                        });
+                }
             } catch (const std::exception &e) {
                 error_ = project_error(e);
             }
@@ -582,7 +848,8 @@ void ProjectWorkspace::draw() {
                     }
                     if (!selection_.empty() && store_->edits.contains(selection_)) {
                         ImGui::BeginDisabled(busy());
-                        if (store_->edits.at(selection_).kind == "field-map-created")
+                        if (store_->edits.at(selection_).kind == "field-map-created" ||
+                            store_->edits.at(selection_).kind == "character-registration-created")
                             ImGui::TextWrapped(
                                 "Map creation record. To remove the map and its registrations "
                                 "together, restore a history version from before creation.");
@@ -669,7 +936,35 @@ void ProjectWorkspace::draw() {
                         store_->settings = settings;
                         store_->save_settings();
                     }
+                    bool reload_after_stage = preferences_.get("project.reload_after_stage") == "1";
+                    if (studio::TutorialWidgets::Checkbox("project_workspace",
+                                                          "Automatically reload after staging",
+                                                          &reload_after_stage)) {
+                        preferences_.set("project.reload_after_stage",
+                                         reload_after_stage ? "1" : "0");
+                        require(preferences_.save(), preferences_.error);
+                    }
                     ImGui::TextWrapped("Original dump: %s", store_->original.string().c_str());
+                    const bool hashed = store_->uses_content_hashes();
+                    ImGui::TextUnformatted(hashed ? "Source verification: SHA-256"
+                                                  : "Source verification: legacy timestamps");
+                    ImGui::BeginDisabled(busy());
+                    const bool verify_source = ImGui::Button(hashed ? "Verify all source contents"
+                                                                    : "Upgrade to content hashes");
+                    ImGui::EndDisabled();
+                    if (verify_source) {
+                        save();
+                        source_action_ = hashed ? 3 : 2;
+                        source_task_ = std::async(
+                            std::launch::async, [copy = *store_, hashed,
+                                                 progress = source_progress_callback()]() mutable {
+                                if (hashed)
+                                    copy.verify_original(true, progress);
+                                else
+                                    copy.upgrade_source_verification(false, progress);
+                                return copy;
+                            });
+                    }
                     static std::filesystem::path measured;
                     static std::string storage;
                     if (measured != store_->root) {

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <limits>
 #include <map>
+#include <sstream>
 namespace studio {
 namespace {
 std::string lowercase(std::string text) {
@@ -75,6 +76,7 @@ void SceneBrowser::rebuild(const Environment &scene) {
     std::map<std::pair<int, std::string>, std::size_t> groups;
     for (unsigned i = 0; i < scene.draws.size(); ++i) {
         auto &draw = scene.draws[i];
+        if (draw.preview_only) continue;
         int category = draw.player >= 0                    ? 5
                        : draw.sky_part >= 0                ? 3
                        : draw.weather_mask                 ? 4
@@ -100,14 +102,59 @@ void SceneBrowser::rebuild(const Environment &scene) {
     for (auto &object : objects_)
         object.search = lowercase(object.search);
 }
-void SceneBrowser::draw(const Environment *scene, const EnvironmentRenderer &renderer,
-                        MaterialSelection &selection, ViewportCamera &camera) {
-    if (selection.reveal_scene)
+int SceneBrowser::character_region(const Environment &scene, int draw) {
+    if (draw < 0 || std::size_t(draw) >= scene.draws.size())
+        return -1;
+    auto scope = scene.draws[draw].scope;
+    if (!scope.starts_with("character/"))
+        return -1;
+    std::replace(scope.begin(), scope.end(), '/', ' ');
+    std::istringstream in(scope);
+    std::string prefix;
+    unsigned category, zone, row;
+    if (!(in >> prefix >> category >> zone >> row))
+        return -1;
+    for (std::size_t i = 0; i < scene.spatial.regions.size(); ++i) {
+        const auto &region = scene.spatial.regions[i];
+        if (region.overworld && region.overworld->category == category &&
+            region.overworld->local_zone == zone && region.overworld->row == row)
+            return int(i);
+    }
+    return -1;
+}
+void SceneBrowser::frame_selection(const Environment &scene, const EnvironmentRenderer &renderer,
+                                   const MaterialSelection &selection,
+                                   ViewportCamera &camera) const {
+    for (const auto &object : objects_)
+        if (std::find(object.draws.begin(), object.draws.end(), selection.draw) !=
+            object.draws.end()) {
+            frame_draws(scene, object.draws, renderer, camera);
+            return;
+        }
+    const auto index = renderer.spatial.selected;
+    if (index >= 0 && std::size_t(index) < scene.spatial.regions.size()) {
+        const auto &region = scene.spatial.regions[index];
+        ViewportCamera::Position low{INFINITY, INFINITY, INFINITY},
+            high{-INFINITY, -INFINITY, -INFINITY};
+        for (const auto &v : region.vertices)
+            for (unsigned c = 0; c < 3; ++c) {
+                low[c] = std::min(low[c], v.position[c]);
+                high[c] = std::max(high[c], v.position[c]);
+            }
+        if (!region.vertices.empty())
+            camera.fit(low, high);
+    }
+}
+void SceneBrowser::draw(const Environment *scene, EnvironmentRenderer &renderer,
+                        MaterialSelection &selection, ViewportCamera &camera, bool embedded) {
+    if (selection.reveal_scene && !embedded)
         ImGui::SetNextWindowFocus();
-    ImGui::Begin("Scene");
+    if (!embedded)
+        ImGui::Begin("Map browser");
     if (!scene) {
         ImGui::TextWrapped("Load a map to browse its objects and materials.");
-        ImGui::End();
+        if (!embedded)
+            ImGui::End();
         return;
     }
     if (selection.reveal_scene) {
@@ -115,11 +162,22 @@ void SceneBrowser::draw(const Environment *scene, const EnvironmentRenderer &ren
         problems_only_ = false;
     }
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##scene-search", "Search objects, meshes, materials, textures",
-                             filter_, sizeof(filter_));
-    studio::TutorialWidgets::Checkbox("scene_browser", "Material issues only", &problems_only_);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Show objects with missing textures or unsupported material settings.");
+    ImGui::InputTextWithHint("##scene-search", "Find objects or materials...", filter_,
+                             sizeof(filter_));
+    if (ImGui::SmallButton("Filters"))
+        ImGui::OpenPopup("Scene filters");
+    if (ImGui::BeginPopup("Scene filters")) {
+        studio::TutorialWidgets::Checkbox("scene_browser", "Material issues only", &problems_only_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Show objects with missing textures or unsupported material settings.");
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear selection")) {
+        selection = {};
+        renderer.spatial.selected = -1;
+    }
     const Object *selected = nullptr;
     for (auto &object : objects_)
         if (std::find(object.draws.begin(), object.draws.end(), selection.draw) !=
@@ -129,20 +187,8 @@ void SceneBrowser::draw(const Environment *scene, const EnvironmentRenderer &ren
         }
     bool can_frame =
         selected && !renderer.player.active && (selected->category < 3 || selected->category == 5);
-    ImGui::BeginDisabled(!can_frame);
-    if (studio::TutorialWidgets::Button("scene_browser", "Frame object (F)"))
-        frame_draws(*scene, selected->draws, renderer, camera);
-    ImGui::SameLine();
-    if (studio::TutorialWidgets::Button("scene_browser", "Frame mesh"))
-        frame_draws(*scene, {selection.draw}, renderer, camera);
-    ImGui::EndDisabled();
     if (can_frame && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F))
         frame_draws(*scene, selected->draws, renderer, camera);
-    if (selected) {
-        ImGui::TextWrapped("%s", selected->name.c_str());
-        ImGui::TextDisabled("%zu mesh parts", selected->draws.size());
-    } else
-        ImGui::TextDisabled("Select a mesh or click the viewport.");
     auto query = lowercase(filter_);
     std::vector<const Object *> matches;
     for (auto &object : objects_)
@@ -153,8 +199,7 @@ void SceneBrowser::draw(const Environment *scene, const EnvironmentRenderer &ren
             matches.push_back(&object);
     ImGui::TextDisabled("%zu / %zu objects", matches.size(), objects_.size());
     ImGui::BeginChild("Scene tree", ImVec2(0, 0));
-    const char *categories[] = {"Terrain", "Static objects", "Characters",
-                                "Sky",     "Weather",        "Player"};
+    const char *categories[] = {"Terrain", "Props", "Characters", "Sky", "Weather", "Player"};
     for (int category = 0; category < 6; ++category) {
         unsigned count = 0;
         for (auto *object : matches)
@@ -164,8 +209,8 @@ void SceneBrowser::draw(const Environment *scene, const EnvironmentRenderer &ren
         ImGui::PushID(category);
         if (selection.reveal_scene && selected && selected->category == category)
             ImGui::SetNextItemOpen(true);
-        bool open = ImGui::TreeNodeEx("category", ImGuiTreeNodeFlags_DefaultOpen, "%s (%u)",
-                                      categories[category], count);
+        bool open = ImGui::TreeNodeEx("category", category < 3 ? ImGuiTreeNodeFlags_DefaultOpen : 0,
+                                      "%s (%u)", categories[category], count);
         if (open) {
             for (auto *object : matches)
                 if (object->category == category) {
@@ -174,9 +219,16 @@ void SceneBrowser::draw(const Environment *scene, const EnvironmentRenderer &ren
                         ImGui::SetNextItemOpen(true);
                     bool expanded = ImGui::TreeNodeEx(
                         "object",
-                        ImGuiTreeNodeFlags_SpanAvailWidth |
+                        ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_OpenOnArrow |
                             (object == selected ? ImGuiTreeNodeFlags_Selected : 0),
                         "%s", object->name.c_str());
+                    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+                        selection.draw = object->draws.front();
+                        selection.material = int(scene->draws[selection.draw].material);
+                        selection.focus = true;
+                        selection.filter[0] = 0;
+                        renderer.spatial.selected = character_region(*scene, selection.draw);
+                    }
                     if (ImGui::IsItemHovered() &&
                         ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && category < 3)
                         frame_draws(*scene, object->draws, renderer, camera);
@@ -198,6 +250,7 @@ void SceneBrowser::draw(const Environment *scene, const EnvironmentRenderer &ren
                                 selection.material = int(mesh.material);
                                 selection.focus = true;
                                 selection.filter[0] = 0;
+                                renderer.spatial.selected = character_region(*scene, index);
                             }
                             if (selection.reveal_scene && selection.draw == index)
                                 ImGui::SetScrollHereY();
@@ -214,10 +267,41 @@ void SceneBrowser::draw(const Environment *scene, const EnvironmentRenderer &ren
         }
         ImGui::PopID();
     }
+    for (auto kind : {SpatialKind::Entrance, SpatialKind::StoryTrigger, SpatialKind::Interaction,
+                      SpatialKind::Pickup, SpatialKind::Encounter}) {
+        if (std::none_of(
+                scene->spatial.regions.begin(), scene->spatial.regions.end(), [&](const auto &r) {
+                    return r.kind == kind &&
+                           (query.empty() || lowercase(r.name).find(query) != std::string::npos);
+                }))
+            continue;
+        ImGui::PushID(int(kind) + 20);
+        if (ImGui::TreeNodeEx("regions", ImGuiTreeNodeFlags_DefaultOpen, "%s",
+                              spatial_kind_name(kind))) {
+            for (std::size_t i = 0; i < scene->spatial.regions.size(); ++i) {
+                const auto &region = scene->spatial.regions[i];
+                if (region.kind != kind ||
+                    (!query.empty() && lowercase(region.name).find(query) == std::string::npos))
+                    continue;
+                ImGui::PushID(int(i));
+                if (ImGui::Selectable(region.name.c_str(), renderer.spatial.selected == int(i))) {
+                    selection = {};
+                    renderer.spatial.selected = int(i);
+                    renderer.spatial.enabled[unsigned(kind)] = true;
+                    renderer.spatial.pick_overlays = true;
+                    renderer.spatial.focus = true;
+                }
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
     if (matches.empty())
         ImGui::TextWrapped("No matching objects. Clear the search or material-issue filter.");
     ImGui::EndChild();
     selection.reveal_scene = false;
-    ImGui::End();
+    if (!embedded)
+        ImGui::End();
 }
 }

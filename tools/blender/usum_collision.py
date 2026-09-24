@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# See LICENSE in this directory.
-
 bl_info = {"name": "USUMStudio Mesh Exchange", "author": "USUMStudio contributors", "version": (1, 1, 0), "blender": (4, 2, 0), "location": "File > Import/Export; 3D View > Sidebar > Collision / USUMStudio", "description": "Edit collision and source-linked object geometry for USUMStudio", "category": "Import-Export"}
 
 import json

@@ -4,6 +4,82 @@
 #include <map>
 #include <set>
 namespace studio {
+MaterialMotion key_material_uv_transform(const MaterialMotion &motion, const std::string &material,
+                                         unsigned unit, unsigned frame,
+                                         const std::array<float, 5> &values,
+                                         const std::array<float, 5> &base) {
+    require(!material.empty() && unit < 3 && frame <= motion.frames,
+            "Invalid UV animation target or frame");
+    auto next = motion;
+    auto track = std::find_if(next.tracks.begin(), next.tracks.end(), [&](auto &t) {
+        return t.kind == MaterialTrack::Kind::TextureTransform && t.material == material &&
+               t.slot == unit;
+    });
+    if (track == next.tracks.end()) {
+        MaterialTrack created;
+        created.material = material;
+        created.slot = unit;
+        next.tracks.push_back(created);
+        track = next.tracks.end() - 1;
+    }
+    for (unsigned i = 0; i < 5; ++i) {
+        require(std::isfinite(values[i]) && std::isfinite(base[i]),
+                "Mapping values must be finite");
+        auto &keys = track->curves[i].keys;
+        std::erase_if(keys, [&](auto &key) {
+            return key.frame == frame;
+        });
+        if (keys.empty() && frame > 0)
+            keys.push_back({0, base[i], 0});
+        keys.push_back({float(frame), values[i], 0});
+        std::sort(keys.begin(), keys.end(), [](auto &a, auto &b) {
+            return a.frame < b.frame;
+        });
+    }
+    return next;
+}
+MaterialMotion make_atlas_flipbook(const MaterialMotion &motion, const std::string &material,
+                                   unsigned slot, const AtlasFlipbook &atlas) {
+    require(std::isfinite(motion.frames) && motion.frames >= 1 && motion.frames <= 65535 &&
+                std::floor(motion.frames) == motion.frames,
+            "Choose a motion with whole frames");
+    const auto cells = std::uint64_t(atlas.columns) * atlas.rows;
+    require(!material.empty() && slot < 3 && atlas.columns && atlas.rows && atlas.tile_count &&
+                atlas.hold_frames && atlas.first_tile < cells &&
+                std::uint64_t(atlas.first_tile) + atlas.tile_count <= cells,
+            "Choose a valid grid, tile range and hold time");
+    MaterialTrack track;
+    track.material = material;
+    track.slot = slot;
+    track.curves[0].keys = {{0, atlas.tile_uvs ? 1.f : 1.f / atlas.columns, 0}};
+    track.curves[1].keys = {{0, atlas.tile_uvs ? 1.f : 1.f / atlas.rows, 0}};
+    track.curves[2].keys = {{0, 0, 0}};
+    for (unsigned channel = 3; channel < 5; ++channel) {
+        auto &keys = track.curves[channel].keys;
+        for (unsigned frame = 0; frame <= unsigned(motion.frames); ++frame) {
+            unsigned step = frame / atlas.hold_frames;
+            unsigned tile =
+                atlas.first_tile +
+                (atlas.repeat ? step % atlas.tile_count : std::min(step, atlas.tile_count - 1));
+            float value =
+                channel == 3 ? -float(tile % atlas.columns) : -float(tile / atlas.columns);
+            if (atlas.tile_uvs)
+                value /= channel == 3 ? atlas.columns : atlas.rows;
+            if (keys.empty() || value != keys.back().value) {
+                if (!keys.empty() && keys.back().frame < frame - 1)
+                    keys.push_back({float(frame - 1), keys.back().value, 0});
+                keys.push_back({float(frame), value, 0});
+            }
+        }
+    }
+    auto next = motion;
+    std::erase_if(next.tracks, [&](const MaterialTrack &existing) {
+        return existing.material == material && existing.slot == slot &&
+               existing.kind != MaterialTrack::Kind::ConstantColor;
+    });
+    next.tracks.push_back(std::move(track));
+    return next;
+}
 Bytes encode_material_tracks(const MaterialMotion &motion, MaterialTrack::Kind kind) {
     std::map<std::string, std::vector<const MaterialTrack *>> groups;
     std::vector<std::string> textures;

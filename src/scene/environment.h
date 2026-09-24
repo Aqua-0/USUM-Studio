@@ -69,7 +69,7 @@ struct SceneDraw {
     std::array<float, 2> weather_scale{1, 1};
     std::array<MaterialColor, 2> object_basis{MaterialColor{1, 0, 0, 0}, MaterialColor{0, 0, 1, 0}};
     std::string mesh, scope;
-    bool character = false, conditional = false;
+    bool character = false, conditional = false, preview_only = false;
     std::string name;
     std::vector<SceneVertex> vertices;
     std::vector<std::uint16_t> indices;
@@ -118,5 +118,6 @@ Bytes texture_mip_chain(const TextureImage &image);
 void complete_normals(SceneDraw &draw);
 Environment load_environment(const std::filesystem::path &dump, std::size_t area,
                              std::atomic_bool *cancel = nullptr,
-                             const ArchiveSources &archives = {});
+                             const ArchiveSources &archives = {},
+                             const std::map<std::size_t, Bytes> &working_members = {});
 }

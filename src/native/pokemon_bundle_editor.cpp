@@ -37,7 +37,9 @@ void PokemonBundleEditor::draw(const ModelDocument &donor, SDL_Window *window) {
                                     std::all_of(project->edits.begin(), project->edits.end(),
                                                 [](const auto &entry) {
                                                     return entry.second.kind == "composition" ||
-                                                           entry.second.kind == "field-map-created";
+                                                           entry.second.kind == "field-map-created" ||
+                                                           entry.second.kind == "character-registration-created" ||
+                                                           (entry.second.kind == "asset-library" || entry.second.kind == "studio-asset");
                                                 }),
                                 "Stage and reload project edits before adding a bundle");
                     require(owner_ == donor.name,
@@ -137,7 +139,9 @@ void PokemonBundleEditor::draw(const ModelDocument &donor, SDL_Window *window) {
                             std::all_of(project->edits.begin(), project->edits.end(),
                                         [](const auto &entry) {
                                             return entry.second.kind == "composition" ||
-                                                   entry.second.kind == "field-map-created";
+                                                   entry.second.kind == "field-map-created" ||
+                                                           entry.second.kind == "character-registration-created" ||
+                                                           (entry.second.kind == "asset-library" || entry.second.kind == "studio-asset");
                                         }),
                         "Stage and reload project edits before adding a bundle");
             choose(1);

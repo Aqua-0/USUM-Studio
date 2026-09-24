@@ -45,9 +45,9 @@ std::vector<PokemonEntry> decode_pokemon_catalog(View b, std::size_t members,
                 1 + TargetProfile::pokemon_stride * ((e.flags & 1) ? shared : e.data_index);
             auto override = TargetProfile::pokemon_motion_override;
             if (species == override[0] && e.form == override[1]) {
-                auto variant = override[2] + unsigned(bool(flags & 2));
-                require(variant < count, "Missing motion-sharing variant");
-                e.motion_member = 1 + TargetProfile::pokemon_stride * (first + variant);
+                auto motion_variant = override[2] + unsigned(bool(flags & 2));
+                require(motion_variant < count, "Missing motion-sharing variant");
+                e.motion_member = 1 + TargetProfile::pokemon_stride * (first + motion_variant);
             }
             result.push_back(std::move(e));
         }

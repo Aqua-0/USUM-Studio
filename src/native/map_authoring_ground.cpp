@@ -1,3 +1,4 @@
+#include "native/undo_shortcuts.h"
 #include "native/tutorial_widgets.h"
 #include "native/map_authoring_workspace.h"
 #include "native/imgui_renderer.h"
@@ -39,25 +40,13 @@ void MapAuthoringWorkspace::set_stage(AuthoringStage stage) {
         refresh_scene();
 }
 void MapAuthoringWorkspace::stage_toolbar() {
-    const char *stages[] = {"1  Terrain", "2  Surfaces", "3  Objects", "4  Review"};
     ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
     const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
-    for (int i = 0; i < 4; ++i) {
-        if (i && ImGui::GetItemRectMax().x + 112 < right)
-            ImGui::SameLine();
-        const bool active = int(stage_) == i;
-        if (active)
-            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        if (studio::TutorialWidgets::Button("map_authoring_ground", stages[i], {104, 28}))
-            set_stage(AuthoringStage(i));
-        if (active)
-            ImGui::PopStyleColor();
-    }
     const auto action = [&](const char *label, bool enabled, auto callback) {
         if (ImGui::GetItemRectMax().x + 65 < right)
             ImGui::SameLine();
         ImGui::BeginDisabled(!enabled);
-        if (studio::TutorialWidgets::Button("map_authoring_ground", label, {55, 28}))
+        if (studio::UndoShortcuts::button("map_authoring_workspace", label, {0, 0}))
             try {
                 callback();
                 error_.clear();
@@ -86,7 +75,7 @@ void MapAuthoringWorkspace::stage_toolbar() {
         refresh_scene();
         status_ = "Edit restored.";
     });
-    action("Save", true, [&] {
+    action("Save Project", true, [&] {
         save();
     });
     ImGui::EndDisabled();
@@ -943,7 +932,7 @@ void MapAuthoringWorkspace::ground_tools() {
                     tilt(0, ground_tilt_step_);
             }
             ImGui::TextWrapped("Choose Height or Slope above the viewport. Shift-drag orbits; hold "
-                               "Shift after grabbing a handle to snap. Escape cancels the edit.");
+                               "Ctrl: snap | Esc: cancel");
             ImGui::EndDisabled();
         }
         if (studio::TutorialWidgets::CollapsingHeader("map_authoring_ground",
@@ -958,6 +947,44 @@ void MapAuthoringWorkspace::ground_tools() {
     ImGui::EndDisabled();
 }
 void MapAuthoringWorkspace::ground_browser() {
+    std::string source_name = "Area " + std::to_string(surface_area_);
+    for (auto &location : library_maps_)
+        if (location.area == int(surface_area_)) {
+            source_name = location.name + " (zone " + std::to_string(location.zone) + ")";
+            break;
+        }
+    ImGui::TextUnformatted("Surface source map");
+    ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##surface-source-map", source_name.c_str())) {
+        std::set<int> shown;
+        for (auto &location : library_maps_) {
+            if (location.area < 0 || location.zone < 0 || !shown.insert(location.area).second)
+                continue;
+            auto label = location.name + " (zone " + std::to_string(location.zone) + ")";
+            if (ImGui::Selectable(label.c_str(), location.area == int(surface_area_))) {
+                auto area = unsigned(location.area);
+                if (surface_keys_.contains(area))
+                    surface_area_ = area;
+                else {
+                    cancel_ = false;
+                    auto dump = dump_;
+                    surface_job_ = std::async(std::launch::async, [this, dump, area] {
+                        SurfaceLibrary library;
+                        library.area = area;
+                        library.scene = load_environment(dump, area, &cancel_);
+                        library.textures = load_ground_textures(dump, library.scene, &cancel_);
+                        return library;
+                    });
+                    status_ = "Reading source map surfaces...";
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (surface_job_.valid())
+        ImGui::TextDisabled("Loading surfaces...");
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##ground-texture-search", "Search surfaces", ground_search_,
                              sizeof(ground_search_));
@@ -972,8 +999,17 @@ void MapAuthoringWorkspace::ground_browser() {
     const auto filter = lower(ground_search_);
     std::vector<std::size_t> matches;
     for (std::size_t i = 0; i < ground_textures_.size(); ++i)
-        if (lower(ground_textures_[i].name).find(filter) != std::string::npos)
+        if (const auto &keys = surface_keys_[surface_area_];
+            std::find(keys.begin(), keys.end(), ground_textures_[i].key) != keys.end() &&
+            lower(ground_textures_[i].name).find(filter) != std::string::npos)
             matches.push_back(i);
+    std::stable_sort(matches.begin(), matches.end(), [&](auto a, auto b) {
+        const auto &x = base_->textures.at(ground_textures_[a].texture);
+        const auto &y = base_->textures.at(ground_textures_[b].texture);
+        auto first = std::uint64_t(x.width) * x.height, second = std::uint64_t(y.width) * y.height;
+        return first != second ? first > second
+                               : ground_textures_[a].name < ground_textures_[b].name;
+    });
     ImGui::TextDisabled("%zu surfaces | largest first", matches.size());
     ImGui::BeginChild("Ground texture palette", {0, 0}, ImGuiChildFlags_Borders);
     const int columns = std::max(1, int(ImGui::GetContentRegionAvail().x / 105));

@@ -8,6 +8,7 @@ class VisibilityMotionEditor {
               bool &playing, bool &repeat);
 
   private:
+    bool graph_expanded_ = false;
     std::string identity_, mesh_, error_;
     int start_ = 0, end_ = 0;
 };

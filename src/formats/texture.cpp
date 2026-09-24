@@ -92,14 +92,14 @@ Bytes encode_texture(View donor, const TextureImage &image, const std::string &n
         if (same_layout && decoded.rgba == image.rgba) {
             Bytes out(donor.begin(), donor.end());
             if (text(slice(donor, 40, 64)) != name) {
-                std::fill(out.begin() + 40, out.begin() + 104, 0);
+                std::fill(out.begin() + 40, out.begin() + 104, std::uint8_t{0});
                 replace_name(out, 40, name);
             }
             return out;
         }
     }
     Bytes out(header.begin(), header.end());
-    std::fill(out.begin() + 40, out.begin() + 104, 0);
+    std::fill(out.begin() + 40, out.begin() + 104, std::uint8_t{0});
     replace_name(out, 40, name);
     put16(out, 104, image.width);
     put16(out, 106, image.height);

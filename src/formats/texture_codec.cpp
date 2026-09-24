@@ -234,7 +234,8 @@ TextureImage decode_texture_pixels(View b, unsigned width, unsigned height, unsi
 }
 TextureImage decode_field_texture(View b) {
     require(u32(b, 0) == 0x15041213, "Invalid field texture");
-    auto width = u16(b, 104), height = u16(b, 106), format = u16(b, 108), levels = u16(b, 110);
+    unsigned width = u16(b, 104), height = u16(b, 106), format = u16(b, 108),
+             levels = u16(b, 110);
     require(width >= 8 && height >= 8 && width <= 2048 && height <= 2048 && width % 8 == 0 &&
                 height % 8 == 0,
             "Invalid field texture dimensions");

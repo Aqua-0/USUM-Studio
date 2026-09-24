@@ -85,7 +85,7 @@ Bytes material(View old, const std::string &name, const std::string &texture) {
 }
 Bytes mesh_names(View old, const std::string &name, const std::string &mat, std::uint8_t bone) {
     Bytes out(old.begin(), old.begin() + 144);
-    std::fill(out.begin() + 20, out.begin() + 84, 0);
+    std::fill(out.begin() + 20, out.begin() + 84, std::uint8_t{0});
     put32(out, 16, hash(name));
     std::copy(name.begin(), name.end(), out.begin() + 20);
     put32(out, 124, 1);

@@ -1,3 +1,4 @@
+#include "assets/battle_effects.h"
 #include "assets/motion_table.h"
 #include "assets/model_library.h"
 #include "assets/material_document.h"
@@ -61,8 +62,7 @@ ModelDocument load_library_model(const std::filesystem::path &dump,
     doc.dump = dump;
     doc.name = entry.name;
     doc.looping_effects = false;
-    Archive archive(path);
-    auto bytes = replacement ? *replacement : archive.decoded(entry.member);
+    auto bytes = replacement ? *replacement : Archive(path).decoded(entry.member);
     auto relative =
         std::filesystem::absolute(path).lexically_relative(std::filesystem::absolute(dump));
     auto logical =
@@ -175,6 +175,14 @@ ModelDocument load_library_model(const std::filesystem::path &dump,
 }
 ModelDocument studio_library_model(const ModelDocument &source, std::size_t resource) {
     auto &link = source.resources.at(resource);
+    if (source.battle_effect) {
+        const auto &member = source.sources.at(link.source);
+        std::map<std::size_t, Bytes> bytes;
+        for (const auto &s : source.sources)
+            bytes[s.member] = s.original;
+        return load_effect_model(source.dump, member.member, member.subfile, link.path,
+                                 source.effect_motions, nullptr, bytes);
+    }
     require(link.role == "Model" && link.path.size() >= 2 && link.path[link.path.size() - 2] == 0,
             "Choose a native model resource");
     std::vector<std::size_t> container_path(link.path.begin(), link.path.end() - 2);
@@ -205,6 +213,7 @@ ModelDocument reload_editable_model(const ModelDocument &source,
         if (auto found = members.find(member.member); found != members.end())
             member.original = found->second;
     auto result = studio_library_model(snapshot, source.material_resources.front());
+    result.independent_asset = source.independent_asset;
     result.looping_effects = source.looping_effects;
     if (source.motion >= 0) {
         auto &before = source.motions.at(source.motion);

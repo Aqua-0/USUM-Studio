@@ -8,6 +8,8 @@
 #include <bgfx/bgfx.h>
 #include <memory>
 #include <optional>
+#include <set>
+#include <algorithm>
 namespace studio {
 class EnvironmentRenderer {
   public:
@@ -22,8 +24,11 @@ class EnvironmentRenderer {
             materials_ = scene_->materials;
     }
     void refresh_textures();
+    void reload_scene_buffers();
+    std::map<std::size_t, Matrix> preview_transforms;
     void preview_vertices(std::size_t draw, const std::vector<SceneVertex> &vertices);
     void select_draw(int draw);
+    void select_draws(const std::set<int> &draws);
     bool draw_visible(std::size_t draw) const {
         return draw >= hidden_draws_.size() || !hidden_draws_[draw];
     }
@@ -31,6 +36,8 @@ class EnvironmentRenderer {
     void show_all_draws();
     std::uint32_t background_color = 0x17232bffu;
     bool highlight_object = true, wireframe = false, outlines = false;
+    bool retain_frame_during_upload = false;
+    bool pica_texture_precision = false;
     float outline_width = 1.f;
     void invalidate_selection_readback() {
         ++scene_generation_;
@@ -47,7 +54,7 @@ class EnvironmentRenderer {
         return picked_refresh_region_;
     }
     std::size_t uploaded_draws() const {
-        return draws_.size();
+        return std::count_if(draws_.begin(), draws_.end(), [](const auto &draw) {return bgfx::isValid(draw.vertices) && bgfx::isValid(draw.indices);});
     }
     bool ready() const;
     struct Lighting {
@@ -76,17 +83,18 @@ class EnvironmentRenderer {
     std::vector<bool> hidden_draws_;
     int selected_draw_ = -1;
     std::vector<bool> highlighted_;
-    bgfx::UniformHandle selection_color_, edge_options_;
+    bgfx::UniformHandle selection_color_, edge_options_, texture_precision_;
     bgfx::FrameBufferHandle edge_target_ = BGFX_INVALID_HANDLE;
     PostProcess post_;
     ParticleRenderer particles_;
     struct Draw {
-        bgfx::VertexBufferHandle vertices;
-        bgfx::IndexBufferHandle indices;
+        bgfx::VertexBufferHandle vertices = BGFX_INVALID_HANDLE;
+        bgfx::IndexBufferHandle indices = BGFX_INVALID_HANDLE;
         bgfx::IndexBufferHandle edges = BGFX_INVALID_HANDLE;
     };
     std::shared_ptr<const Environment> scene_;
     std::vector<Draw> draws_;
+    std::set<std::size_t> previewed_draws_;
     std::vector<SceneMaterial> materials_;
     std::map<std::string, bgfx::TextureHandle> textures_;
     std::vector<bgfx::TextureHandle> bloom_masks_;
@@ -117,6 +125,7 @@ class EnvironmentRenderer {
     bgfx::TextureHandle scene_copy_ = BGFX_INVALID_HANDLE, white_,
                         lookup_texture_ = BGFX_INVALID_HANDLE;
     unsigned lookup_height_ = 1;
+    bgfx::TextureHandle complete_frame_ = BGFX_INVALID_HANDLE;
     bgfx::FrameBufferHandle target_ = BGFX_INVALID_HANDLE;
     unsigned width_ = 0, height_ = 0, pick_width_ = 0, pick_height_ = 0;
     bgfx::FrameBufferHandle pick_target_ = BGFX_INVALID_HANDLE;

@@ -42,6 +42,12 @@ jobs:
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS_INSTALL=%%i"
           call "%VS_INSTALL%\VC\Auxiliary\Build\vcvars64.bat"
           if errorlevel 1 exit /b 1
+          cmake -S cmake/pawn-compiler -B build/pawn -G Ninja -DCMAKE_BUILD_TYPE=Release -DPAWN_SOURCE=%CD%/dependencies/pawn-compiler
+          if errorlevel 1 exit /b 1
+          cmake --build build/pawn --parallel 2
+          if errorlevel 1 exit /b 1
+          python tools/pawn-release/verify.py --compiler build/pawn/bin/gf-pawncc.exe --include resources/pawn
+          if errorlevel 1 exit /b 1
           cmake -S dependencies/source -B dependencies/graphics -G Ninja -DCMAKE_BUILD_TYPE=Release -DBGFX_BUILD_EXAMPLES=OFF -DBGFX_WITH_WAYLAND=OFF -DBGFX_AMALGAMATED=ON
           if errorlevel 1 exit /b 1
           cmake --build dependencies/graphics --target bgfx bimg bx shaderc --parallel 2
@@ -53,6 +59,9 @@ jobs:
       - name: Build Linux editor
         if: runner.os == 'Linux'
         run: |
+          cmake -S cmake/pawn-compiler -B build/pawn -G Ninja -DCMAKE_BUILD_TYPE=Release -DPAWN_SOURCE="$PWD/dependencies/pawn-compiler"
+          cmake --build build/pawn --parallel 2
+          python3 tools/pawn-release/verify.py --compiler build/pawn/bin/gf-pawncc --include resources/pawn
           cmake -S dependencies/source -B dependencies/graphics -G Ninja -DCMAKE_BUILD_TYPE=Release -DBGFX_BUILD_EXAMPLES=OFF -DBGFX_WITH_WAYLAND=OFF -DBGFX_AMALGAMATED=ON
           cmake --build dependencies/graphics --target bgfx bimg bx shaderc --parallel 2
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTUDIO_GRAPHICS_SOURCE=dependencies/source -DSTUDIO_GRAPHICS_BUILD=dependencies/graphics -DSTUDIO_IMGUI_SOURCE=dependencies/imgui -DSTUDIO_SDL_SOURCE=dependencies/sdl3 -DSDL_WAYLAND=OFF

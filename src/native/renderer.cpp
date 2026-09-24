@@ -1,3 +1,5 @@
+#include "scene/resource_reuse.h"
+#include "scene/material_draw_order.h"
 #include "native/renderer.h"
 #include "native/render_views.h"
 #include <cstring>
@@ -116,6 +118,7 @@ EnvironmentRenderer::EnvironmentRenderer(const std::filesystem::path &path)
     uv_v_ = bgfx::createUniform("u_uvRowV", bgfx::UniformType::Vec4, 3);
     buffer_ = bgfx::createUniform("u_buffer", bgfx::UniformType::Vec4);
     preview_ = bgfx::createUniform("u_preview", bgfx::UniformType::Vec4);
+    texture_precision_ = bgfx::createUniform("u_texturePrecision", bgfx::UniformType::Vec4);
     cutaway_ = bgfx::createUniform("u_cutaway", bgfx::UniformType::Vec4);
     light_ = bgfx::createUniform("u_lighting", bgfx::UniformType::Vec4);
     light_direction_ = bgfx::createUniform("u_lightDirection", bgfx::UniformType::Vec4);
@@ -166,12 +169,13 @@ void EnvironmentRenderer::clear() {
         bgfx::destroy(lookup_texture_);
     lookup_texture_ = BGFX_INVALID_HANDLE;
     for (auto &d : draws_) {
-        bgfx::destroy(d.vertices);
-        bgfx::destroy(d.indices);
+        if(bgfx::isValid(d.vertices)) bgfx::destroy(d.vertices);
+        if(bgfx::isValid(d.indices)) bgfx::destroy(d.indices);
         if (bgfx::isValid(d.edges))
             bgfx::destroy(d.edges);
     }
     draws_.clear();
+    previewed_draws_.clear();
     for (auto &[name, t] : textures_)
         bgfx::destroy(t);
     textures_.clear();
@@ -210,6 +214,7 @@ EnvironmentRenderer::~EnvironmentRenderer() {
     bgfx::destroy(uv_v_);
     bgfx::destroy(buffer_);
     bgfx::destroy(preview_);
+    bgfx::destroy(texture_precision_);
     bgfx::destroy(cutaway_);
     bgfx::destroy(projection_rows_);
     bgfx::destroy(projection_options_);
@@ -249,6 +254,12 @@ void EnvironmentRenderer::select_draw(int draw) {
                                          part.name.substr(0, part.name.find(" / ")) == name)));
     }
 }
+void EnvironmentRenderer::select_draws(const std::set<int> &draws) {
+    selected_draw_ = -2;
+    highlighted_.assign(scene_ ? scene_->draws.size() : 0, false);
+    for (auto draw : draws)
+        if (draw >= 0 && std::size_t(draw) < highlighted_.size()) highlighted_[draw] = true;
+}
 void EnvironmentRenderer::set_draw_visible(std::size_t draw, bool visible) {
     if (draw >= hidden_draws_.size() || hidden_draws_[draw] == !visible)
         return;
@@ -262,9 +273,45 @@ void EnvironmentRenderer::show_all_draws() {
 void EnvironmentRenderer::set_scene(std::shared_ptr<const Environment> scene) {
     if (scene_ == scene)
         return;
+    std::vector<Draw> reused;
+    std::map<std::string,bgfx::TextureHandle> reused_textures;
+    bgfx::TextureHandle reused_lookup = BGFX_INVALID_HANDLE;
+    if(retain_frame_during_upload && scene_ && scene && ready()) {
+        auto mapping=reusable_scene_draws(*scene_,*scene);
+        reused.resize(mapping.size());
+        for(std::size_t i=0;i<mapping.size();++i)
+            if(mapping[i]<draws_.size() && !previewed_draws_.contains(mapping[i])) {
+                reused[i]=draws_[mapping[i]];draws_[mapping[i]]={};
+            }
+        for(const auto &[name,image]:scene->textures) {
+            auto old=scene_->textures.find(name);
+            auto handle=textures_.find(name);
+            if(old!=scene_->textures.end() && handle!=textures_.end() && same_texture_pixels(old->second,image)) {
+                reused_textures.emplace(name,handle->second);textures_.erase(handle);
+            }
+        }
+        if(scene_->lighting_tables.size()==scene->lighting_tables.size() &&
+            std::equal(scene_->lighting_tables.begin(),scene_->lighting_tables.end(),scene->lighting_tables.begin(),
+                [](const auto &a,const auto &b){return a.values==b.values;})) {
+            reused_lookup=lookup_texture_;lookup_texture_=BGFX_INVALID_HANDLE;
+        }
+    }
     refresh.set_regions({}, {});
     clear();
+    draws_=std::move(reused);
+    textures_=std::move(reused_textures);
+    lookup_texture_=reused_lookup;
+    if(bgfx::isValid(lookup_texture_)) texture_bytes=std::max(std::size_t(1),scene->lighting_tables.size())*256*sizeof(float);
+    for(const auto &[name,handle]:textures_) {
+        auto &image=scene->textures.at(name);
+        unsigned w=image.width,h=image.height;
+        for(;;) {texture_bytes+=std::size_t(w)*h*4;if(w==1&&h==1)break;w=std::max(1u,w/2);h=std::max(1u,h/2);}
+    }
+    for(std::size_t i=0;i<draws_.size();++i) if(bgfx::isValid(draws_[i].vertices))
+        geometry_bytes+=scene->draws[i].vertices.size()*sizeof(SceneVertex)+scene->draws[i].indices.size()*2;
+
     scene_ = std::move(scene);
+    preview_transforms.clear();
     hidden_draws_.assign(scene_ ? scene_->draws.size() : 0, false);
     spatial.set_scene(scene_);
     particles_.set_scene(scene_ ? scene_->weather_particles : std::vector<WeatherParticles>{});
@@ -285,8 +332,22 @@ void EnvironmentRenderer::set_scene(std::shared_ptr<const Environment> scene) {
         bloom_masks_.push_back(mask);
     }
 }
+void EnvironmentRenderer::reload_scene_buffers() {
+    auto scene = scene_;
+    auto previous_lighting = lighting;
+    int selected_region = spatial.selected;
+    auto hidden = hidden_draws_;
+    int selected = selected_draw_;
+    scene_.reset();
+    set_scene(scene);
+    lighting = previous_lighting;
+    spatial.selected = selected_region;
+    for (std::size_t i = 0; i < std::min(hidden.size(), hidden_draws_.size()); ++i)
+        hidden_draws_[i] = hidden[i];
+    if (selected >= 0 && std::size_t(selected) < scene->draws.size()) select_draw(selected);
+}
 bool EnvironmentRenderer::ready() const {
-    return scene_ && draws_.size() == scene_->draws.size() &&
+    return scene_ && uploaded_draws() == scene_->draws.size() &&
            textures_.size() == scene_->textures.size();
 }
 void EnvironmentRenderer::refresh_textures() {
@@ -311,6 +372,7 @@ void EnvironmentRenderer::preview_vertices(std::size_t draw,
     require(bgfx::isValid(buffer), "Geometry preview buffer allocation failed");
     bgfx::destroy(draws_[draw].vertices);
     draws_[draw].vertices = buffer;
+    previewed_draws_.insert(draw);
     invalidate_selection_readback();
 }
 void EnvironmentRenderer::upload_step(std::size_t budget) {
@@ -345,8 +407,10 @@ void EnvironmentRenderer::upload_step(std::size_t budget) {
         if (used >= budget)
             return;
     }
-    while (draws_.size() < scene_->draws.size()) {
-        auto &d = scene_->draws[draws_.size()];
+    draws_.resize(scene_->draws.size());
+    for(std::size_t index=0;index<draws_.size();++index) {
+        if(bgfx::isValid(draws_[index].vertices) && bgfx::isValid(draws_[index].indices)) continue;
+        auto &d = scene_->draws[index];
         auto vb = bgfx::createVertexBuffer(
             bgfx::copy(d.vertices.data(), narrow(d.vertices.size() * sizeof(SceneVertex))),
             layout_);
@@ -359,7 +423,7 @@ void EnvironmentRenderer::upload_step(std::size_t budget) {
                 bgfx::destroy(ib);
             throw std::runtime_error("Scene buffer allocation failed");
         }
-        draws_.push_back({vb, ib});
+        draws_[index]={vb, ib};
         auto n = d.vertices.size() * sizeof(SceneVertex) + d.indices.size() * 2;
         used += n;
         geometry_bytes += n;
@@ -371,12 +435,15 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                                                 const float *projection, bool vertex_colors,
                                                 bool cutaway, float cut_height, bool raw_materials,
                                                 bool picking) {
+    if (!picking && retain_frame_during_upload && scene_ && !ready() && bgfx::isValid(complete_frame_))
+        return complete_frame_;
     const bool refresh_active = refresh.active(), draw_wireframe = wireframe && !refresh_active;
     auto &target = picking ? pick_target_ : target_;
     auto &target_width = picking ? pick_width_ : width_;
     auto &target_height = picking ? pick_height_ : height_;
     auto view_id = bgfx::ViewId(picking ? RenderViews::picking : RenderViews::scene);
     if (width != target_width || height != target_height) {
+        if (!picking) complete_frame_ = BGFX_INVALID_HANDLE;
         if (!picking && bgfx::isValid(edge_target_)) {
             bgfx::destroy(edge_target_);
             edge_target_ = BGFX_INVALID_HANDLE;
@@ -453,6 +520,14 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
     auto poses = scene_ ? evaluate_scene_poses(scene_->skeletons, player, playback.seconds,
                                                lighting.hour, playback.enabled && playback.skeletal)
                         : std::vector<std::vector<Matrix>>{};
+    std::set<int> preview_rigs;
+    if (scene_)
+        for (const auto &[index, transform] : preview_transforms) {
+            if (index >= scene_->draws.size()) continue;
+            int rig = scene_->draws[index].skeleton;
+            if (rig >= 0 && std::size_t(rig) < poses.size() && preview_rigs.insert(rig).second)
+                poses[rig] = evaluate_skeleton(scene_->skeletons[rig], playback.seconds, lighting.hour, true);
+        }
     EnvironmentEffects effects;
     if (scene_ && lighting.context < scene_->lighting_contexts.size())
         effects = evaluate_environment_effects(scene_->lighting_contexts[lighting.context],
@@ -466,15 +541,17 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
         if (material.screen_refraction)
             refraction_scopes.insert(material.resource_scope);
     bool refraction_started = false;
+    auto draw_order = scene_ ? material_draw_order(scene_->draws, materials_, draws_.size()) : std::vector<std::size_t>{};
     if (scene_ && geometry_enabled)
         for (unsigned phase = 0; phase < 2; ++phase)
-            for (std::size_t i = 0; i < draws_.size(); ++i) {
+            for (auto i : draw_order) {
                 if (!draw_visible(i) || !visible[i] ||
                     (scene_->draws[i].character &&
                      (!characters_enabled ||
                       (!conditional_characters && scene_->draws[i].conditional))))
                     continue;
                 auto &d = draws_[i];
+                if(!bgfx::isValid(d.vertices) || !bgfx::isValid(d.indices)) continue;
                 auto &mat = materials_[scene_->draws[i].material];
                 bool late = mat.screen_refraction ||
                             (mat.layer >= 4 && refraction_scopes.contains(mat.resource_scope));
@@ -506,6 +583,7 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                     refraction_started = true;
                 }
                 auto &source_draw = scene_->draws[i];
+                if (picking && source_draw.preview_only) continue;
                 if (source_draw.player >= 0 &&
                     (!player.active || source_draw.player != int(player.appearance)))
                     continue;
@@ -747,10 +825,13 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                 float preview[4] = {supported ? 1.f : 0.f, vertex_colors ? 1.f : 0.f,
                                     float(mat.alpha_function), float(mat.alpha_reference) / 255.f};
                 bgfx::setUniform(preview_, preview);
+                const float precision[4] = {pica_texture_precision ? 1.f : 0.f, 0.f, 0.f, 0.f};
+                bgfx::setUniform(texture_precision_, precision);
                 float cut[4] = {cutaway ? 1.f : 0.f, cut_height, fallback ? 1.f : 0.f,
                                 draw_wireframe && !picking ? 1.f : 0.f};
                 bgfx::setUniform(cutaway_, cut);
-                auto transform = source_draw.placement >= 0
+                auto transform = preview_transforms.contains(i) ? preview_transforms.at(i)
+                                 : source_draw.placement >= 0
                                      ? scene_->placement_transforms.at(source_draw.placement)
                                      : pose_identity();
                 float model[16];
@@ -884,9 +965,13 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
             const auto &image = *scene_->lighting_contexts[lighting.context].bloom_mask;
             scale = {std::min(1.f, 400.f / image.width), std::min(1.f, 240.f / image.height)};
         }
-        return post_.render(bgfx::getTexture(target), width, height, effects.bloom, mask, scale);
+        auto output = post_.render(bgfx::getTexture(target), width, height, effects.bloom, mask, scale);
+        if (ready()) complete_frame_ = output;
+        return output;
     }
-    return bgfx::getTexture(target);
+    auto output = bgfx::getTexture(target);
+    if (!picking && ready()) complete_frame_ = output;
+    return output;
 }
 bool EnvironmentRenderer::request_pick(unsigned x, unsigned y, unsigned width, unsigned height,
                                        const float *view, const float *projection, bool colors,

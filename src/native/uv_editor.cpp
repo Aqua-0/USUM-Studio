@@ -1,6 +1,7 @@
 #include "native/tutorial_widgets.h"
 #include "native/uv_editor.h"
 #include "native/imgui_renderer.h"
+#include "native/texture_uv_preview.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -71,6 +72,13 @@ void UvEditor::sync(MaterialDocument &doc, int material, unsigned channel) {
         fit_ = true;
 }
 void UvEditor::transform(ImVec2 move, float angle, ImVec2 scale) {
+    if (ImGui::GetIO().KeyCtrl && dragging_) {
+        move.x = std::round(move.x * 100) / 100;
+        move.y = std::round(move.y * 100) / 100;
+        angle = std::round(angle / .261799388f) * .261799388f;
+        scale.x = std::round(scale.x * 10) / 10;
+        scale.y = std::round(scale.y * 10) / 10;
+    }
     float c = std::cos(angle), s = std::sin(angle);
     for (std::size_t i = 0; i < points_.size(); ++i)
         if (points_[i].selected) {
@@ -117,20 +125,20 @@ void UvEditor::draw(MaterialDocument &doc, const EnvironmentRenderer &renderer, 
     studio::TutorialWidgets::RadioButton("uv_editor", "Islands", &selection_, 1);
     studio::TutorialWidgets::RadioButton("uv_editor", "Select", &operation_, 0);
     ImGui::SameLine();
-    studio::TutorialWidgets::RadioButton("uv_editor", "Move", &operation_, 1);
+    studio::TutorialWidgets::RadioButton("uv_editor", "Move (G)", &operation_, 1);
     ImGui::SameLine();
-    studio::TutorialWidgets::RadioButton("uv_editor", "Rotate", &operation_, 2);
+    studio::TutorialWidgets::RadioButton("uv_editor", "Rotate (R)", &operation_, 2);
     ImGui::SameLine();
-    studio::TutorialWidgets::RadioButton("uv_editor", "Scale", &operation_, 3);
+    studio::TutorialWidgets::RadioButton("uv_editor", "Scale (S)", &operation_, 3);
     if (studio::TutorialWidgets::Button("uv_editor", "Select all"))
         for (auto &p : points_)
             p.selected = true;
     ImGui::SameLine();
-    if (studio::TutorialWidgets::Button("uv_editor", "Clear"))
+    if (studio::TutorialWidgets::Button("uv_editor", "Clear selection"))
         for (auto &p : points_)
             p.selected = false;
     ImGui::SameLine();
-    if (studio::TutorialWidgets::Button("uv_editor", "Fit UVs"))
+    if (studio::TutorialWidgets::Button("uv_editor", "Frame UVs (F)"))
         fit_ = true;
     auto count = std::count_if(points_.begin(), points_.end(), [](auto &p) {
         return p.selected;
@@ -165,9 +173,9 @@ void UvEditor::draw(MaterialDocument &doc, const EnvironmentRenderer &renderer, 
         ImGui::EndDisabled();
         ImGui::TreePop();
     }
-    ImGui::TextWrapped(
-        "Click or drag a box to select; Ctrl adds/removes. In Move/Rotate/Scale, drag the canvas "
-        "to transform the selection. Escape cancels. Wheel zooms; middle drag pans.");
+    if (ImGui::CollapsingHeader("Controls"))
+        ImGui::TextWrapped("Click/box: select | Ctrl: add/remove | G/R/S: tool | Esc: cancel\n"
+                           "Wheel: zoom | Middle drag: pan | F: frame UVs");
     if (!error_.empty())
         ImGui::TextWrapped("%s", error_.c_str());
     auto origin = ImGui::GetCursorScreenPos();
@@ -177,6 +185,16 @@ void UvEditor::draw(MaterialDocument &doc, const EnvironmentRenderer &renderer, 
                            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
     bool hovered = ImGui::IsItemHovered();
     auto &io = ImGui::GetIO();
+    if (hovered && !dragging_ && !boxing_ && !io.WantTextInput && !io.KeyCtrl) {
+        if (ImGui::IsKeyPressed(ImGuiKey_G))
+            operation_ = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_R))
+            operation_ = 2;
+        if (ImGui::IsKeyPressed(ImGuiKey_S))
+            operation_ = 3;
+        if (ImGui::IsKeyPressed(ImGuiKey_F))
+            fit_ = true;
+    }
     float base = std::min(size.x, size.y);
     if (fit_ && !points_.empty()) {
         float lo_x = INFINITY, lo_y = INFINITY, hi_x = -INFINITY, hi_y = -INFINITY;
@@ -262,7 +280,7 @@ void UvEditor::draw(MaterialDocument &doc, const EnvironmentRenderer &renderer, 
         }
     }
     if (dragging_) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) || io.AppFocusLost) {
             for (std::size_t i = 0; i < points_.size(); ++i)
                 points_[i].uv = before_[i];
             dragging_ = false;
@@ -285,7 +303,7 @@ void UvEditor::draw(MaterialDocument &doc, const EnvironmentRenderer &renderer, 
                 apply(doc);
         }
     }
-    if (boxing_ && ImGui::IsKeyPressed(ImGuiKey_Escape))
+    if (boxing_ && (ImGui::IsKeyPressed(ImGuiKey_Escape) || io.AppFocusLost))
         boxing_ = false;
     if (boxing_ && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         std::set<std::size_t> hits, islands;
@@ -304,7 +322,7 @@ void UvEditor::draw(MaterialDocument &doc, const EnvironmentRenderer &renderer, 
     }
     auto *lines = ImGui::GetWindowDrawList();
     lines->PushClipRect(origin, {origin.x + size.x, origin.y + size.y}, true);
-    lines->AddRectFilled(origin, {origin.x + size.x, origin.y + size.y}, IM_COL32(25, 32, 38, 255));
+    draw_texture_checkerboard(origin, size);
     auto lo = uv(origin), hi = uv({origin.x + size.x, origin.y + size.y});
     auto texture =
         renderer.texture(doc.model.scene->materials.at(material).texture_inputs.at(unit));
@@ -316,7 +334,7 @@ void UvEditor::draw(MaterialDocument &doc, const EnvironmentRenderer &renderer, 
                 bool flip_u = input.wrap_u == 3 && x % 2 != 0,
                      flip_v = input.wrap_v == 3 && y % 2 != 0;
                 auto a = screen({float(x), float(y)}), b = screen({float(x + 1), float(y + 1)});
-                lines->AddImage(ImTextureID(ImGuiRenderer::image_id(texture, false)), a, b,
+                lines->AddImage(ImTextureID(ImGuiRenderer::image_id(texture, true)), a, b,
                                 {flip_u ? 1.f : 0.f, flip_v ? 1.f : 0.f},
                                 {flip_u ? 0.f : 1.f, flip_v ? 0.f : 1.f},
                                 IM_COL32(190, 190, 190, 255));

@@ -1,3 +1,5 @@
+#include "assets/character_registration.h"
+#include "assets/battle_effects.h"
 #include "native/project_binding.h"
 #include "field/map_creation.h"
 #include "assets/material_document.h"
@@ -9,6 +11,12 @@
 #include "field/camera_document.h"
 #include "field/warp_document.h"
 #include "field/weather_document.h"
+#include "field/zone_document.h"
+#include "field/interaction_document.h"
+#include "field/interaction_source.h"
+#include "field/conversation_workspace.h"
+#include "field/pedestrian_routes.h"
+#include "formats/container.h"
 #include "field/pickup_document.h"
 #include "field/overworld_document.h"
 #include "field/encounter_document.h"
@@ -158,6 +166,29 @@ Bytes project_encode_file(const std::function<void(const std::filesystem::path &
     std::filesystem::remove(file);
     return result;
 }
+ModelDocument load_project_effect_model(const std::filesystem::path &source,
+                                        const std::string &parameters) {
+    std::istringstream args(parameters);
+    std::string kind;
+    require(bool(args >> kind) && kind == "battle-effect", "Invalid battle effect source");
+    std::size_t member, count;
+    unsigned subfile;
+    require(bool(args >> member >> subfile >> count) && count <= 12,
+            "Invalid battle effect source");
+    std::vector<std::size_t> path(count);
+    for (auto &child : path)
+        require(bool(args >> child), "Missing effect resource path");
+    require(bool(args >> count) && count <= 128, "Invalid effect motion count");
+    std::vector<EffectMotionSource> motions(count);
+    for (auto &motion : motions) {
+        require(bool(args >> motion.member >> motion.subfile >> count) && count <= 12,
+                "Invalid effect motion source");
+        motion.path.resize(count);
+        for (auto &child : motion.path)
+            require(bool(args >> child), "Missing effect motion path");
+    }
+    return load_effect_model(source, member, subfile, path, motions);
+}
 std::string project_model_parameters(const ModelDocument &model) {
     std::ostringstream out;
     if (model.is_pokemon())
@@ -169,6 +200,19 @@ std::string project_model_parameters(const ModelDocument &model) {
             << c.lip << ' ' << model.clothing_part;
         for (auto item : c.items)
             out << ' ' << item;
+    } else if (model.battle_effect) {
+        const auto &link = model.resources.at(model.material_resources.front());
+        const auto &source = model.sources.at(link.source);
+        out << "battle-effect " << source.member << ' ' << source.subfile << ' '
+            << link.path.size();
+        for (auto child : link.path)
+            out << ' ' << child;
+        out << ' ' << model.effect_motions.size();
+        for (const auto &motion : model.effect_motions) {
+            out << ' ' << motion.member << ' ' << motion.subfile << ' ' << motion.path.size();
+            for (auto child : motion.path)
+                out << ' ' << child;
+        }
     } else if (model.area < 0) {
         require(!model.sources.empty(), "Model source is missing");
         auto relative = model.sources.front().archive.is_absolute()
@@ -199,16 +243,47 @@ std::string project_model_parameters(const ModelDocument &model) {
     }
     return out.str();
 }
+ProjectBuildResult stage_editor_project(const ProjectBuild &build) {
+    auto result = ProjectStore::stage(build, export_project_edit);
+    if (std::none_of(build.edits.begin(), build.edits.end(), [](const auto &edit) {
+            return edit.kind == "warps";
+        }))
+        return result;
+    auto before = load_warp_destinations(build.source);
+    auto after = load_warp_destinations(result.directory);
+    for (const auto &old : before) {
+        if (std::any_of(after.begin(), after.end(), [&](const auto &entry) {
+                return entry.zone == old.zone && entry.event == old.event;
+            }))
+            continue;
+        for (const auto &entry : after)
+            require(!entry.destination || *entry.destination != std::pair{old.zone, old.event},
+                    "Deleted zone " + std::to_string(old.zone) + " / entrance " +
+                        std::to_string(old.event) + " is still targeted by zone " +
+                        std::to_string(entry.zone) + " / entrance " + std::to_string(entry.event) +
+                        ". Retarget or delete that entrance, then stage again.");
+    }
+    return result;
+}
 void export_project_edit(const ProjectEdit &e, const std::filesystem::path &source,
                          const std::filesystem::path &file, const std::filesystem::path &output) {
     auto patch = text(read_file(file));
     std::istringstream args(e.parameters);
     unsigned area = 0;
+    if (e.kind == "character-registration") {
+        auto data = read_file(file);
+        patch.assign(data.begin(), data.end());
+        export_character_registration(Archive(source / TargetProfile::character_archive),
+                                      CharacterRegistration::parse(patch),
+                                      output / TargetProfile::character_archive);
+        return;
+    }
     if (e.kind == "field-map") {
         export_map_creation(source, MapCreation::parse(patch), output);
         return;
     }
-    if (e.kind == "field-map-created")
+    if (e.kind == "field-map-created" || e.kind == "character-registration-created" ||
+        (e.kind == "asset-library" || e.kind == "studio-asset"))
         return;
     if (e.kind == "material" || e.kind == "pokemon-settings") {
         std::string kind;
@@ -233,6 +308,8 @@ void export_project_edit(const ProjectEdit &e, const std::filesystem::path &sour
             for (auto &item : selection.items)
                 require(bool(args >> item), "Missing clothing item");
             model = load_clothing(source, selection, part);
+        } else if (kind == "battle-effect") {
+            model = load_project_effect_model(source, e.parameters);
         } else if (kind == "field-character") {
             std::string path, name;
             std::size_t member, character, selected;
@@ -312,6 +389,43 @@ void export_project_edit(const ProjectEdit &e, const std::filesystem::path &sour
         }
         return;
     }
+    if (e.kind == "pedestrians") {
+        require(bool(args >> area), "Invalid pedestrian field area");
+        Archive field(source / GameProfile::field_archive(source));
+        PedestrianDocument doc(
+            field.decoded(area * TargetProfile::area_stride + TargetProfile::placement_slot));
+        doc.restore(patch);
+        doc.export_to(source, output, area);
+        return;
+    }
+    if (e.kind == "shared-interaction") {
+        unsigned member;
+        require(bool(args >> member), "Invalid shared script member");
+        InteractionDocument doc(
+            read_shared_script(Archive(source / TargetProfile::shared_script_archive), member));
+        doc.restore(patch);
+        doc.export_shared(source, output, member);
+        return;
+    }
+    if (e.kind == "interaction") {
+        unsigned local_zone;
+        require(bool(args >> area >> local_zone), "Invalid interaction zone");
+        Archive field(source / GameProfile::field_archive(source));
+        auto scripts = Container::parse(
+            field.decoded(area * TargetProfile::area_stride + TargetProfile::zone_script_slot),
+            "ZS");
+        require(local_zone < scripts.files.size(), "Interaction zone script is missing");
+        InteractionDocument doc(scripts.files[local_zone]);
+        doc.restore(patch);
+        doc.export_to(source, output, area, local_zone);
+        return;
+    }
+    if (e.kind == "zone_settings") {
+        ZoneDocument doc(Archive(source / TargetProfile::zone_archive).decoded(0));
+        doc.restore(patch);
+        doc.export_to(source, output);
+        return;
+    }
     if (e.kind == "weather") {
         WeatherDocument doc(Archive(source / TargetProfile::zone_archive).decoded(0));
         doc.restore(patch);
@@ -382,6 +496,21 @@ void export_project_edit(const ProjectEdit &e, const std::filesystem::path &sour
             if (doc.changed())
                 doc.export_to(output);
         }
+        return;
+    }
+    if (e.kind == "authored-conversations") {
+        std::string baseline;
+        require(bool(args >> area >> std::quoted(baseline)), "Invalid conversation source");
+        require(baseline.empty() ||
+                    (baseline.size() == 64 &&
+                     baseline.find_first_not_of("0123456789abcdef") == std::string::npos),
+                "Invalid conversation baseline");
+        auto pinned = file.parent_path().parent_path() / "member-sources" /
+                      (baseline.empty() ? "original" : baseline);
+        ConversationWorkspace workspace(pinned, area);
+        workspace.restore(patch);
+        workspace.export_to(output, e.replay_staged ? ConversationBuildMode::PreviouslyStaged
+                                                    : ConversationBuildMode::Current);
         return;
     }
     if (e.kind == "composition") {

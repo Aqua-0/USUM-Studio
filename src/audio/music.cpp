@@ -1,3 +1,4 @@
+#include "core/filesystem.h"
 #include "core/resource_source.h"
 #include "audio/music.h"
 #include "audio/music_profile.h"
@@ -34,9 +35,9 @@ int signed16(View b, std::size_t p) {
 }
 }
 unsigned map_music_sound(unsigned id) {
-    require((id >> 16) == 1 && (id & 65535) < map_music_ids.size(),
-            "This map music ID is not supported by the Ultra Moon profile");
-    return map_music_ids[id & 65535];
+    require((id >> 16) == 1 && (id & 65535) < map_music_count,
+            "This map music ID is not supported by the Ultra Sun/Ultra Moon profile");
+    return id & 65535;
 }
 MusicSamples decode_music(View b) {
     require(text(slice(b, 0, 4)) == "CSTM" && u32(b, 12) == b.size(),
@@ -98,7 +99,7 @@ MusicSamples decode_music(View b) {
                 int value = (b[packet + 1 + (n % 14) / 2] >> ((n % 2) ? 0 : 4)) & 15;
                 if (value >= 8)
                     value -= 16;
-                auto sum = std::int64_t(value) * (1 << (header & 15)) * 2048 +
+                auto sum = std::int64_t(value) * (std::int64_t{1} << (header & 15)) * 2048 +
                            std::int64_t(coefficients[predictor * 2]) * h1 +
                            std::int64_t(coefficients[predictor * 2 + 1]) * h2 + 1024;
                 auto decoded = std::clamp<std::int64_t>(
@@ -150,7 +151,7 @@ std::map<unsigned, MusicTrack> read_music_catalog(const std::filesystem::path &d
             ++end;
         require(end < b.size(), "Unterminated sound filename");
         auto name = text(slice(b, path, end - path));
-        std::filesystem::path relative = std::filesystem::u8path(name);
+        std::filesystem::path relative = path_from_utf8(name);
         require(!relative.is_absolute() && relative.filename() == relative &&
                     relative.extension() == ".bcstm",
                 "Unsupported external music path");

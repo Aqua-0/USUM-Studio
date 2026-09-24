@@ -1,7 +1,9 @@
 #pragma once
 #include "native/project_binding.h"
+#include "native/existing_map_editor.h"
 #include "native/collision_editor.h"
 #include "authoring/composition_document.h"
+#include "assets/material_document.h"
 #include "native/renderer.h"
 #include "native/camera.h"
 #include "native/folder_picker.h"
@@ -22,6 +24,13 @@ class MapAuthoringWorkspace {
     bool ready() const {
         return document_ && renderer_.ready() && !busy();
     }
+    std::optional<std::size_t> take_studio_request() {
+        return std::exchange(studio_request_, {});
+    }
+    ModelDocument open_asset_studio(std::size_t resource);
+    void attach_asset_studio(std::shared_ptr<MaterialDocument> document,
+                             std::function<bool()> ready);
+    void save_asset_studio();
     bool take_collision_request() {
         bool result = collision_request_;
         collision_request_ = false;
@@ -39,12 +48,24 @@ class MapAuthoringWorkspace {
     std::string report() const;
 
   private:
+    std::unique_ptr<ExistingMapEditor> existing_editor_;
+    bool existing_mode_ = true;
+    bool authoring_seen_ = false;
+    std::uint32_t last_authoring_frame_ = 0;
+    std::optional<SpatialPoint> surface_position_;
     std::unique_ptr<CollisionEditor> collision_editor_;
     bool collision_request_ = false;
     std::string project_ground_base_;
     std::string project_baseline_;
     ProjectBinding project_;
     void bind_project();
+    void capture_asset_studio();
+    std::optional<std::size_t> studio_request_;
+    std::size_t studio_resource_ = 0;
+    int studio_model_ = 0;
+    std::function<bool()> studio_ready_;
+    std::shared_ptr<MaterialDocument> studio_document_;
+    std::optional<ProjectAsset> studio_baseline_;
     struct Loaded {
         std::shared_ptr<Environment> base;
         std::unique_ptr<CompositionDocument> document;
@@ -52,10 +73,12 @@ class MapAuthoringWorkspace {
         std::filesystem::path dump, path;
         std::vector<GroundTexture> textures;
         std::vector<MapLocation> maps;
+        std::vector<std::string> surface_keys;
     };
     bool busy() const {
         return load_job_.valid() || resource_job_.valid() || library_job_.valid() ||
-               review_job_.valid() || dialog_kind_ != 0 ||
+               surface_job_.valid() || review_job_.valid() || dialog_kind_ != 0 ||
+               object_dialog_kind_ != 0 ||
                (collision_editor_ && collision_editor_->operation_pending());
     }
     void begin_asset_edit();
@@ -66,7 +89,15 @@ class MapAuthoringWorkspace {
     void asset_edit_history(bool redo);
     void remember_asset_edit();
     void save_asset_edit(bool copy);
-    void object_exchange_dialog(bool save);
+    void object_exchange_dialog(bool save, bool new_model = false, bool package = false);
+    std::optional<ProjectAsset> package_export_;
+    const Environment &asset_source(const ProjectAsset &asset) const {
+        static const Environment empty;
+        return asset.source == ProjectAsset::no_source ? empty : resources_.at(asset.source);
+    }
+    void new_object_import();
+    std::optional<ModelExchange> new_object_;
+    std::vector<std::size_t> new_object_materials_;
     void object_exchange_result();
     std::shared_ptr<FolderSelection> object_dialog_ = std::make_shared<FolderSelection>();
     int object_dialog_kind_ = 0;
@@ -74,6 +105,11 @@ class MapAuthoringWorkspace {
     std::string object_exchange_signature_, object_exchange_path_;
     std::shared_ptr<Environment> asset_edit_geometry_;
     void sync_project_assets();
+    void project_library();
+    void publish_library_asset(bool replace);
+    std::string library_asset_key_;
+    std::filesystem::path library_project_root_;
+    char library_search_[128]{};
     bool asset_edit_ = false, asset_box_drag_ = false;
     int asset_selection_mode_ = 0;
     ImVec2 asset_box_start_{};
@@ -85,6 +121,16 @@ class MapAuthoringWorkspace {
     char asset_name_[121]{};
     std::map<std::size_t, ProjectAsset> project_cache_;
     void poll();
+    void object_drag_source(std::size_t resource, const std::string &name);
+    bool object_interaction(ImVec2 origin, ImVec2 size,
+                            const std::function<bool(SpatialPoint, ImVec2 &)> &project, bool hovered);
+    std::optional<std::size_t> object_drag_resource_;
+    bool object_drop_preview_ = false, object_drag_canceled_ = false;
+    float object_rotation_last_ = 0, object_rotation_delta_ = 0;
+    int object_axis_ = -1;
+    ImVec2 object_drag_mouse_{}, object_axis_screen_{};
+    PlacementState object_drag_start_;
+    float object_axis_length_ = 1;
     void browser();
     void details();
     void viewport(std::uint32_t frame);
@@ -150,6 +196,14 @@ class MapAuthoringWorkspace {
     std::vector<CompositionInstance> shown_;
     std::future<Loaded> load_job_;
     std::future<MapResourceCatalog> library_job_;
+    struct SurfaceLibrary {
+        unsigned area;
+        Environment scene;
+        std::vector<GroundTexture> textures;
+    };
+    std::future<SurfaceLibrary> surface_job_;
+    std::map<unsigned, std::vector<std::string>> surface_keys_;
+    unsigned surface_area_ = 0;
     std::future<std::string> review_job_;
     std::vector<MapLocation> library_maps_;
     unsigned library_area_ = 0;

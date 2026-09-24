@@ -73,15 +73,88 @@ int predict(int value, int scale, int c1, int c2, int h1, int h2) {
         std::clamp<std::int64_t>(sum >= 0 ? sum / 2048 : -((-sum + 2047) / 2048), -32768, 32767));
 }
 }
+CryExpansionRouting read_cry_expansion_routing(View code, std::size_t archive_size) {
+    CryExpansionRouting out;
+    auto target = [&](std::size_t at) {
+        auto word = u32(code, at);
+        auto displacement = std::int32_t((word & 0xffffff) << 8) / 64;
+        auto destination = std::int64_t(at) + 8 + displacement;
+        require((word >> 24) == 0xea && destination >= 0 &&
+                    std::uint64_t(destination) + 4 <= code.size(),
+                "Unsupported cry routing branch");
+        return std::size_t(destination);
+    };
+    for (auto hook : {0x2be1c0u, 0x2be1c4u}) {
+        if (hook + 4 > code.size() || (u32(code, hook) >> 24) != 0xea)
+            continue;
+        auto start = target(hook);
+        constexpr unsigned common[] = {0xe3560000, 0x0a000012, 0xe356001f, 0x8a000010, 0xe3540b02,
+                                       0x2a000011, 0xe1840586, 0,          0xe4912004, 0xe6ff3072,
+                                       0xe1530000, 0x3afffffb, 0x1a000007, 0xe1a02822, 0xe3120902,
+                                       0x0a000009, 0xe2442fca, 0xe35200d9, 0x9a000006, 0xe3a06000,
+                                       0xea000002, 0xe2442fca, 0xe35200d9, 0x9a000001, 0xe3540000};
+        slice(code, start, 120);
+        for (unsigned i = 0; i < std::size(common); ++i)
+            if (i != 7)
+                require(u32(code, start + i * 4) == common[i], "Unsupported patched cry lookup");
+        auto adr = u32(code, start + 28);
+        require(adr == 0xe28f1054 || adr == 0xe28f1060, "Unsupported cry form table location");
+        out.redirect_meltan = adr == 0xe28f1060;
+        unsigned length = out.redirect_meltan ? 132 : 120;
+        slice(code, start, length);
+        require(target(start + 100) == hook + 4 && target(start + length - 8) == hook + 172,
+                "Cry lookup returns to an unsupported location");
+        unsigned route = 104;
+        if (out.redirect_meltan) {
+            require(u32(code, start + route) == 0xe3540fca &&
+                        u32(code, start + route + 4) == 0x03a02c01 &&
+                        u32(code, start + route + 8) == 0x0282201d,
+                    "Unsupported Meltan cry redirect");
+            route += 12;
+        }
+        require(u32(code, start + route) == 0xe59f3004 &&
+                    u32(code, start + route + 4) == 0xe0835802,
+                "Unsupported expanded cry binding");
+        auto packed = u32(code, start + length - 4);
+        out.sequence = packed & 65535;
+        out.first_wave = packed >> 16;
+        require(out.sequence < archive_size && out.first_wave + 217 < archive_size &&
+                    (!out.redirect_meltan || out.first_wave + 285 < archive_size),
+                "Expansion cry routing references missing audio; use a matching code.bin and cry "
+                "archive");
+        unsigned previous = 0;
+        bool ended = false;
+        for (std::size_t at = start + length; at + 4 <= code.size() && at < start + length + 8192;
+             at += 4) {
+            auto key = u16(code, at), clip = u16(code, at + 2);
+            if (key == 65535) {
+                ended = true;
+                break;
+            }
+            require(key > previous && (key & 2047) > 0 && (key >> 11) > 0 &&
+                        (clip == 0x8000 || out.first_wave + clip < archive_size),
+                    "Invalid expansion cry form mapping");
+            out.forms.emplace(key, clip);
+            previous = key;
+        }
+        require(ended, "Expansion cry form table is unterminated");
+        out.enabled = true;
+        return out;
+    }
+    return out;
+}
 CryLibrary::CryLibrary(const std::filesystem::path &dump) : archive(dump / CryProfile::archive) {
-    std::ifstream f(resource_file_path(dump / "exefs/code.bin"), std::ios::binary);
-    require(bool(f), "Cry mappings require the dump's ExeFS/code.bin");
-    Bytes table(CryProfile::table_rows * 20);
-    f.seekg(CryProfile::table_offset);
-    f.read(reinterpret_cast<char *>(table.data()), std::streamsize(table.size()));
-    require(bool(f), "Cannot read the Ultra Moon cry table");
-    require(u32(table, 24) == (4368u << 16) && u32(table, 44) == ((4369u << 16) | 5),
-            "This executable's cry table is not supported");
+    auto code = read_file(resource_file_path(executable_resource_path(dump)));
+    expansion_ = read_cry_expansion_routing(code, archive.size());
+    std::size_t offset = CryProfile::table_offset;
+    auto matches = [&](std::size_t at) {
+        return at + CryProfile::table_rows * 20 <= code.size() &&
+               u32(code, at + 24) == (4368u << 16) && u32(code, at + 44) == ((4369u << 16) | 5);
+    };
+    if (!matches(offset))
+        offset -= 4;
+    require(matches(offset), "This executable's retail cry table is not supported");
+    auto table = slice(code, offset, CryProfile::table_rows * 20);
     for (unsigned row = 0; row < CryProfile::table_rows; ++row) {
         std::array<unsigned, 5> values{};
         for (unsigned i = 0; i < 5; ++i)
@@ -95,7 +168,7 @@ CryLibrary::CryLibrary(const std::filesystem::path &dump) : archive(dump / CryPr
     }
 }
 unsigned CryLibrary::forms(unsigned species) const {
-    auto start = rows_.at(species)[0];
+    auto start = species <= CryProfile::species_max ? rows_.at(species)[0] : 0;
     if (!start)
         return 0;
     unsigned end = unsigned(rows_.size());
@@ -105,8 +178,28 @@ unsigned CryLibrary::forms(unsigned species) const {
     return end - start;
 }
 CryBinding CryLibrary::binding(unsigned species, unsigned form, unsigned context) const {
-    require(species > 0 && species <= CryProfile::species_max && context < 4,
-            "This Pokemon is outside the supported retail cry table");
+    require(species > 0 && species <= (expansion_.enabled ? 1025u : CryProfile::species_max) &&
+                context < 4,
+            "No cry mapping for this species. Expansion Pokemon require the matching patched "
+            "code.bin.");
+    if (expansion_.enabled) {
+        unsigned clip = 0x8000;
+        if (form > 0 && form <= 31) {
+            auto found = expansion_.forms.find(species | (form << 11));
+            if (found != expansion_.forms.end()) {
+                clip = found->second;
+                if (clip == 0x8000)
+                    form = 0;
+            }
+        }
+        if (clip == 0x8000 && species >= 808)
+            clip = species - 808;
+        if (clip != 0x8000) {
+            if (expansion_.redirect_meltan && species == 808)
+                clip = 285;
+            return {expansion_.sequence, expansion_.first_wave + clip};
+        }
+    }
     unsigned row = species;
     if (form && rows_[species][0]) {
         require(form <= forms(species), "This form has no supported cry mapping");
@@ -117,13 +210,22 @@ CryBinding CryLibrary::binding(unsigned species, unsigned form, unsigned context
 }
 std::vector<std::string> CryLibrary::uses(unsigned member) const {
     std::vector<std::string> out;
-    for (unsigned species = 1; species <= CryProfile::species_max; ++species)
+    for (unsigned species = 1; species <= (expansion_.enabled ? 1025u : CryProfile::species_max);
+         ++species) {
+        std::vector<unsigned> known_forms;
         for (unsigned form = 0; form <= forms(species); ++form)
+            known_forms.push_back(form);
+        for (const auto &[key, clip] : expansion_.forms)
+            if ((key & 2047) == species &&
+                std::find(known_forms.begin(), known_forms.end(), key >> 11) == known_forms.end())
+                known_forms.push_back(key >> 11);
+        for (auto form : known_forms)
             for (unsigned context = 0; context < 4; ++context)
                 if (binding(species, form, context).wave_archive == member)
                     out.push_back("Species " + std::to_string(species) + ", " +
                                   (form ? "form " + std::to_string(form) : "base cry") + ": " +
                                   cry_contexts[context]);
+    }
     return out;
 }
 MusicSamples decode_cry(View archive) {
@@ -227,68 +329,11 @@ Bytes encode_cry(View original, const MusicSamples &mono) {
     put32(out, 84, narrow(wave.size()));
     return out;
 }
-MusicSamples import_cry_wav(View b) {
-    require(text(slice(b, 0, 4)) == "RIFF" && text(slice(b, 8, 4)) == "WAVE" &&
-                u32(b, 4) + std::uint64_t(8) == b.size(),
-            "Expected a RIFF WAV file");
-    View format, data;
-    for (std::size_t p = 12; p + 8 <= b.size();) {
-        auto size = u32(b, p + 4);
-        auto chunk = slice(b, p + 8, size);
-        auto tag = text(slice(b, p, 4));
-        if (tag == "fmt ")
-            format = chunk;
-        if (tag == "data")
-            data = chunk;
-        p += 8 + std::size_t(size) + (size & 1);
-    }
-    auto type = u16(format, 0), channels = u16(format, 2), bits = u16(format, 14);
-    auto rate = u32(format, 4);
-    require(channels >= 1 && channels <= 2 && rate >= 8000 && rate <= 192000,
-            "WAV must have one or two channels at 8–192 kHz");
-    require((type == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32)) ||
-                (type == 3 && bits == 32),
-            "Use uncompressed PCM or 32-bit float WAV");
-    unsigned stride = channels * (bits / 8);
-    require(u16(format, 12) == stride && !data.empty() && data.size() % stride == 0,
-            "Invalid WAV sample layout");
-    auto frames = data.size() / stride;
-    require(frames <= rate * 120ull, "Import a WAV of two minutes or less, then trim the cry");
-    MusicSamples out;
-    out.rate = rate;
-    out.channels = 1;
-    out.pcm.resize(frames);
-    for (std::size_t i = 0; i < frames; ++i) {
-        double sum = 0;
-        for (unsigned c = 0; c < channels; ++c) {
-            auto p = i * stride + c * (bits / 8);
-            double v = 0;
-            if (type == 3) {
-                float f = f32(data, p);
-                require(std::isfinite(f), "WAV contains non-finite samples");
-                v = f * 32768.;
-            } else if (bits == 8)
-                v = (int(data[p]) - 128) * 256.;
-            else if (bits == 16)
-                v = signed16(data, p);
-            else if (bits == 24) {
-                int x = data[p] | (data[p + 1] << 8) | (data[p + 2] << 16);
-                if (x & 0x800000)
-                    x -= 0x1000000;
-                v = x / 256.;
-            } else {
-                auto x = u32(data, p);
-                v = (x < 0x80000000 ? double(x) : double(x) - 4294967296.) / 65536.;
-            }
-            sum += std::clamp(v, -32768., 32767.);
-        }
-        out.pcm[i] = std::int16_t(std::lround(sum / channels));
-    }
-    return out;
-}
 MusicSamples prepare_cry(const MusicSamples &source, float start, float end, float gain) {
-    require(source.channels == 1 && source.rate > 0 && std::isfinite(start) && std::isfinite(end) &&
-                std::isfinite(gain) && start >= 0 && end > start && gain >= 0 && gain <= 4,
+    require((source.channels == 1 || source.channels == 2) &&
+                source.pcm.size() % source.channels == 0 && source.rate > 0 &&
+                std::isfinite(start) && std::isfinite(end) && std::isfinite(gain) && start >= 0 &&
+                end > start && gain >= 0 && gain <= 4,
             "Invalid cry trim or gain");
     auto first = std::size_t(std::llround(double(start) * source.rate)),
          last = std::min(source.frames(), std::size_t(std::llround(double(end) * source.rate)));
@@ -312,7 +357,10 @@ MusicSamples prepare_cry(const MusicSamples &source, float start, float end, flo
             double sinc = std::abs(z) < 1e-10 ? 1. : std::sin(z) / z;
             double window = .5 + .5 * std::cos(std::numbers::pi * x / (radius + 1));
             double w = sinc * window;
-            sum += source.pcm[std::size_t(index)] * w;
+            double sample = 0;
+            for (unsigned channel = 0; channel < source.channels; ++channel)
+                sample += source.pcm[std::size_t(index) * source.channels + channel];
+            sum += sample / source.channels * w;
             weight += w;
         }
         double v = weight ? sum / weight * gain : 0;

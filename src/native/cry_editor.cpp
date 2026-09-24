@@ -1,3 +1,4 @@
+#include "audio/wave_import.h"
 #include "native/tutorial_widgets.h"
 #include "native/cry_editor.h"
 #include "audio/audio_document.h"
@@ -175,7 +176,7 @@ void CryEditor::update(bool active) {
             } else if (action_ == FileAction::Import) {
                 require(std::filesystem::file_size(file) <= 128 * 1024 * 1024,
                         "Import a WAV smaller than 128 MiB");
-                imported_ = import_cry_wav(read_file(file));
+                imported_ = import_audio_wav(read_file(file));
                 import_name_ = file.filename().string();
                 trim_start_ = 0;
                 trim_end_ = float(double(imported_.frames()) / imported_.rate);

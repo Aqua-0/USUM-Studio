@@ -16,11 +16,12 @@ def add(files, name, source):
 
 def archive(destination, files, executable=None):
     destination.parent.mkdir(parents=True, exist_ok=True)
+    executables = {executable} if isinstance(executable, str) else set(executable or ())
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as output:
         for name, data in sorted(files.items()):
             entry = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))
             entry.create_system = 3
-            entry.external_attr = (0o100755 if name == executable else 0o100644) << 16
+            entry.external_attr = (0o100755 if name in executables else 0o100644) << 16
             entry.compress_type = zipfile.ZIP_DEFLATED
             output.writestr(entry, data)
     with zipfile.ZipFile(destination) as output:
@@ -36,6 +37,8 @@ def editor(args):
     name = "usum-viewport.exe" if windows else "usum-viewport"
     files = {}
     add(files, name, build / name)
+    compiler = "gf-pawncc.exe" if windows else "gf-pawncc"
+    compiler_path = args.build.resolve() / "pawn/bin" / compiler
     if windows:
         add(files, "SDL3.dll", build / "SDL3.dll")
     for folder in ("resources", "viewport-shaders"):
@@ -45,6 +48,7 @@ def editor(args):
         for file in source.rglob("*"):
             if file.is_file():
                 add(files, file.relative_to(build).as_posix(), file)
+    add(files, "resources/pawn/" + compiler, compiler_path)
     for profile in ("glsl", "spirv"):
         for effect in ("environment", "post", "particle", "spatial"):
             for stage in ("vs", "fs"):
@@ -53,6 +57,12 @@ def editor(args):
     add(files, "LICENSE", ROOT / "LICENSE")
     notices = {
         "Pawn.txt": ROOT / "licenses/PAWN_DISASSEMBLY.txt",
+        "Pawn-compiler-LICENSE.txt": dependencies / "pawn-compiler/compiler/LICENSE",
+        "Pawn-compiler-NOTICE.txt": dependencies / "pawn-compiler/compiler/NOTICE",
+        "Pawn-Linux-support-LICENSE.txt": ROOT / "cmake/pawn-compiler/support/LICENSE",
+        "Pawn-Linux-support-NOTICE.txt": ROOT / "cmake/pawn-compiler/support/NOTICE",
+        "Pawn-Linux-support-provenance.md": ROOT / "cmake/pawn-compiler/support/PROVENANCE.md",
+        "BinReloc.txt": ROOT / "cmake/pawn-compiler/support/binreloc.h",
         "DejaVuSans.txt": ROOT / "resources/fonts/LICENSE.txt",
         "Dear-ImGui.txt": dependencies / "imgui/LICENSE.txt",
         "SDL3.txt": dependencies / "sdl3/LICENSE.txt",
@@ -112,7 +122,7 @@ def editor(args):
         )
     files["README.txt"] = instructions.encode()
     prefix = "USUMStudio-" + args.platform
-    archive(args.output / (prefix + ".zip"), {prefix + "/" + k: v for k, v in files.items()}, prefix + "/" + name)
+    archive(args.output / (prefix + ".zip"), {prefix + "/" + k: v for k, v in files.items()}, [prefix + "/" + name, prefix + "/resources/pawn/" + compiler])
 
 
 def blender(args):
@@ -134,12 +144,12 @@ def source(args):
     args.output.mkdir(parents=True, exist_ok=True)
     destination = args.output / "USUMStudio-source.zip"
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as output:
-        for name in ("CMakeLists.txt", "README.md", "LICENSE", ".gitignore", "src", "cmake", "resources", "icon", "licenses", "tools/blender", ".github"):
+        for name in ("CMakeLists.txt", "README.md", "LICENSE", ".gitignore", ".gitattributes", "src", "cmake", "resources", "icon", "licenses", "tools/blender", "tools/pawn-release", ".github"):
             path = ROOT / name
             for file in ([path] if path.is_file() else sorted(path.rglob("*"))):
                 if file.is_file() and "__pycache__" not in file.parts:
                     output.write(file, "USUMStudio/" + file.relative_to(ROOT).as_posix())
-        for name in ("source", "imgui", "sdl3"):
+        for name in ("source", "imgui", "sdl3", "pawn-compiler"):
             path = args.dependencies / name
             if not path.is_dir():
                 raise RuntimeError(f"Missing dependency source: {name}")
@@ -152,13 +162,18 @@ def source(args):
     print(destination.name)
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("kind", choices=("editor", "blender", "source"))
-parser.add_argument("--platform", choices=("windows-x64", "linux-x64"))
-parser.add_argument("--build", type=Path, default=ROOT / "build")
-parser.add_argument("--dependencies", type=Path, default=ROOT / "dependencies")
-parser.add_argument("--output", type=Path, default=ROOT / "dist")
-args = parser.parse_args()
-if args.kind == "editor" and not args.platform:
-    parser.error("editor packages require --platform")
-{"editor": editor, "blender": blender, "source": source}[args.kind](args)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("kind", choices=("editor", "blender", "source"))
+    parser.add_argument("--platform", choices=("windows-x64", "linux-x64"))
+    parser.add_argument("--build", type=Path, default=ROOT / "build")
+    parser.add_argument("--dependencies", type=Path, default=ROOT / "dependencies")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist")
+    args = parser.parse_args()
+    if args.kind == "editor" and not args.platform:
+        parser.error("editor packages require --platform")
+    {"editor": editor, "blender": blender, "source": source}[args.kind](args)
+
+
+if __name__ == "__main__":
+    main()

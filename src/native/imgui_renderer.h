@@ -2,6 +2,7 @@
 #include <bgfx/bgfx.h>
 #include "native/viewport_resolution.h"
 #include <cstdint>
+#include <vector>
 struct ImDrawData;
 namespace studio {
 class ImGuiRenderer {
@@ -16,6 +17,11 @@ class ImGuiRenderer {
     void render(ImDrawData *data);
 
   private:
+    struct OverflowBuffers {
+        bgfx::DynamicVertexBufferHandle vertices = BGFX_INVALID_HANDLE;
+        bgfx::DynamicIndexBufferHandle indices = BGFX_INVALID_HANDLE;
+    };
+    std::vector<OverflowBuffers> overflow_;
     bgfx::ProgramHandle program_;
     bgfx::TextureHandle font_ = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle sampler_;

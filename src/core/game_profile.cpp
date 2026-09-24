@@ -44,6 +44,28 @@ const char *game_target_name(GameTarget target) {
 const char *game_target_id(GameTarget target) {
     return target == GameTarget::UltraSun ? "ultra-sun" : "ultra-moon";
 }
+const char *GameProfile::external_resource_name(const std::filesystem::path &path) {
+    const auto name = path.generic_string();
+    if (name == personal_archive)
+        return "Pokémon personal data";
+    if (name == "romfs/a/0/1/1")
+        return "Moves";
+    if (name == "romfs/a/0/1/2")
+        return "Egg moves";
+    if (name == "romfs/a/0/1/3")
+        return "Learnsets";
+    if (name == "romfs/a/0/1/4")
+        return "Evolutions";
+    if (name == "romfs/a/0/3/0")
+        return "Game text";
+    if (name == "romfs/a/1/0/5")
+        return "Trainer classes";
+    if (name == "romfs/a/1/0/6")
+        return "Trainer settings";
+    if (name == "romfs/a/1/0/7")
+        return "Trainer teams";
+    return "Game resource";
+}
 const char *GameProfile::field_archive(const std::filesystem::path &dump) {
     return detect_game_target(dump) == GameTarget::UltraSun ? sun_field_archive
                                                             : moon_field_archive;

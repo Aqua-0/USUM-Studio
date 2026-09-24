@@ -1,3 +1,4 @@
+#include "native/viewport_navigation.h"
 #include "native/tutorial_widgets.h"
 #include "native/pokemon_settings_editor.h"
 #include "native/imgui_renderer.h"
@@ -10,6 +11,7 @@
 #include <sstream>
 namespace studio {
 void PokemonSettingsEditor::bind(const ModelDocument &model) {
+    project_.unbind();
     if (sendout_job_.valid())
         sendout_job_.wait();
     sendout_job_ = {};
@@ -34,7 +36,7 @@ void PokemonSettingsEditor::bind(const ModelDocument &model) {
     }
     dump_ = model.dump;
     archive_ = model.archive_sources.resolve(dump_, TargetProfile::pokemon_archive);
-    if (!model.is_pokemon() || model.shadow_model)
+    if (!model.is_pokemon() || model.shadow_model || !model.independent_asset.empty())
         return;
     try {
         Archive archive(archive_);
@@ -747,16 +749,9 @@ void PokemonSettingsEditor::viewport(const ModelDocument &model, double seconds)
                      {std::max(1.f, size.x), std::max(1.f, size.y)}, {0, flip ? 1.f : 0.f},
                      {1, flip ? 0.f : 1.f});
         if (!sendout_model_ && ImGui::IsItemHovered() && !io.WantTextInput) {
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) ||
-                ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
-                ImGui::IsMouseDragging(ImGuiMouseButton_Middle) || io.MouseWheel != 0)
+            if (viewport_navigating() || io.MouseWheel != 0)
                 camera_mode_ = 4;
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-                camera_.rotate(io.MouseDelta.x, io.MouseDelta.y, false);
-            if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
-                ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
-                camera_.pan(io.MouseDelta.x, io.MouseDelta.y);
-            camera_.wheel(io.MouseWheel, false);
+            viewport_navigation(camera_, window_, true);
         }
     } catch (const std::exception &e) {
         message_ = std::string("Battle preview failed: ") + e.what();

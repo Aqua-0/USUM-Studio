@@ -103,14 +103,16 @@ static ModelDocument load_pokemon_impl(const std::filesystem::path &dump, const 
     doc.pokemon = entry;
     doc.name = entry.label + (shadow_model ? " / Shadow" : "");
     doc.shiny = shiny;
-    Archive archive(archives.resolve(dump, TargetProfile::pokemon_archive));
+    std::unique_ptr<Archive> archive;
     ModelDecoder decoder;
     decoder.cancel = cancel;
     decoder.keep_skeleton = true;
     decoder.skeletal_motions["model/"] = {SkeletalMotion{}, false};
     auto decoded = [&](std::size_t index) {
         auto it = overrides.find(index);
-        return it == overrides.end() ? archive.decoded(index) : it->second;
+        if (it != overrides.end()) return it->second;
+        if (!archive) archive = std::make_unique<Archive>(archives.resolve(dump, TargetProfile::pokemon_archive));
+        return archive->decoded(index);
     };
     auto management = decoded(0);
     doc.sources.push_back(
@@ -286,6 +288,7 @@ ModelDocument reload_pokemon(const ModelDocument &source,
             }))
             result.sources.push_back(
                 {TargetProfile::pokemon_archive, index, "Effect resources", sha256(bytes), bytes});
+    result.independent_asset = source.independent_asset;
     result.refresh_feeding = source.refresh_feeding;
     result.feeding_error = source.feeding_error;
     result.looping_effects = source.looping_effects;

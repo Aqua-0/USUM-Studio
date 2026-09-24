@@ -12,6 +12,10 @@ class ProjectBinding {
     void bind(std::string kind, std::string key, std::string label, std::string parameters,
               std::function<bool()> dirty, std::function<Bytes()> encode,
               std::function<void()> saved);
+    void unbind() {
+        dirty_ = {}; encode_ = {}; saved_ = {}; ready_ = {}; autosave_ready_ = {};
+        imported_ = captured_ = false; edit_ = {}; baseline_.clear();
+    }
     std::filesystem::path document() const;
     bool capture();
     void acknowledge();
@@ -53,7 +57,10 @@ void set_project_store(ProjectStore *store);
 bool save_editor_project();
 Bytes project_text(const std::string &value);
 Bytes project_encode_file(const std::function<void(const std::filesystem::path &)> &writer);
+ModelDocument load_project_effect_model(const std::filesystem::path &source,
+                                        const std::string &parameters);
 std::string project_model_parameters(const ModelDocument &model);
+ProjectBuildResult stage_editor_project(const ProjectBuild &build);
 void export_project_edit(const ProjectEdit &edit, const std::filesystem::path &source,
                          const std::filesystem::path &document,
                          const std::filesystem::path &output);

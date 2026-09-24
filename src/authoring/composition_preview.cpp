@@ -1,5 +1,6 @@
 #include "authoring/composition_document.h"
 #include <cmath>
+#include "scene/model_decoder.h"
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
@@ -41,7 +42,41 @@ void validate_authored_mesh(const AuthoredMesh &mesh) {
                 "Edited mesh contains a collapsed triangle; remove degenerate faces in Blender");
     }
 }
-Environment project_asset_geometry(const Environment &source, const ProjectAsset &asset) {
+Environment project_asset_resource_preview(View resource) {
+    auto object = Container::parse(resource, "SM");
+    require(object.files.size() == 29, "Invalid project asset resource");
+    auto pack = ModelPack::parse(object.files.at(1));
+    ModelDecoder decoder;
+    for (const auto &r : pack.resources)
+        if (r.category == 3 || r.category == 4)
+            decoder.shader(r.bytes, "resource/");
+    for (const auto &r : pack.resources)
+        if (r.category == 1)
+            decoder.texture(r.bytes, "resource/");
+    for (std::size_t i = 0; i < pack.resources.size(); ++i) {
+        const auto &r = pack.resources[i];
+        if (r.category != 0)
+            continue;
+        require(Model::parse(r.bytes).bones == 0, "Project props must remain unskinned");
+        decoder.source = std::make_shared<SceneModelSource>(SceneModelSource{{}, 0, {1, i}});
+        decoder.placed_model(r.bytes, r.name, "resource/");
+    }
+    require(!decoder.out.draws.empty(), "Project asset has no geometry");
+    for (unsigned slot : {TargetProfile::static_loop_motion, TargetProfile::static_daily_motion})
+        if (!object.files.at(slot).empty())
+            decoder.motion(object.files[slot], "Asset motion", "resource/",
+                           slot == TargetProfile::static_daily_motion);
+    for (auto &animation : decoder.out.material_animations)
+        for (std::size_t t = 0; t < animation.motion.tracks.size(); ++t)
+            for (std::size_t m = 0; m < decoder.out.materials.size(); ++m)
+                if (animation.motion.tracks[t].material == decoder.out.materials[m].name)
+                    animation.bindings.push_back({t, m});
+    return std::move(decoder.out);
+}
+Environment project_asset_geometry(const Environment &original, const ProjectAsset &asset) {
+    const auto source = asset.native_resource.empty()
+                            ? original
+                            : project_asset_resource_preview(asset.native_resource);
     if (asset.meshes.empty())
         return source;
     require(asset.meshes.size() == source.draws.size(),
@@ -142,8 +177,9 @@ ProjectAsset import_object_exchange(const std::string &text, const ProjectAsset 
 }
 
 void validate_project_asset(const ProjectAsset &asset, const MapResourceCatalog &catalog) {
-    require(asset.source < catalog.entries.size() &&
-                catalog.entries[asset.source].geometry_complete,
+    require((asset.source == ProjectAsset::no_source && !asset.native_resource.empty()) ||
+                (asset.source < catalog.entries.size() &&
+                 catalog.entries[asset.source].geometry_complete),
             "Project asset source is missing or unsupported");
     require(asset.name.find_first_not_of(" \t") != std::string::npos && asset.name.size() <= 120 &&
                 asset.name.find_first_of("\r\n") == std::string::npos,
@@ -168,6 +204,50 @@ void validate_project_asset(const ProjectAsset &asset, const MapResourceCatalog 
     }
     require(count > 0 && count <= 4000000,
             "Keep at least one face; extraction supports up to four million faces per asset");
+}
+ProjectAsset import_new_project_asset(const ModelExchange &model, const ProjectAsset &baseline,
+                                      const std::vector<std::size_t> &materials) {
+    require(model.standalone && model.joints.empty(),
+            "Export an unrigged model for a static map asset");
+    require(materials.size() == model.meshes.size(),
+            "Assign a game material to each imported part");
+    auto result = baseline;
+    result.meshes.assign(baseline.faces.size(), {});
+    result.faces.assign(baseline.faces.size(), {});
+    result.pivot = {};
+    for (std::size_t i = 0; i < model.meshes.size(); ++i) {
+        require(materials[i] < result.meshes.size(), "Choose an available map material");
+        const auto &part = model.meshes[i];
+        auto &mesh = result.meshes[materials[i]];
+        auto offset = narrow(mesh.vertices.size());
+        require(offset + part.vertices.size() <= 65536,
+                "This material exceeds 65536 vertices; simplify it or assign parts to separate "
+                "game materials");
+        for (const auto &v : part.vertices) {
+            for (auto weight : v.weights)
+                require(weight == 0, "Static assets cannot contain bone weights");
+            AuthoredVertex vertex;
+            unsigned index = 0;
+            for (unsigned c : {0u, 1u, 2u, 4u, 5u, 6u}) {
+                require(part.formats[c][0] == 3, "New model attributes must use floating point");
+                for (unsigned k = 0; k < (c < 3 ? 3u : 2u); ++k)
+                    vertex.values[index++] = v.channels[c][k];
+            }
+            vertex.color = 0;
+            for (unsigned k = 0; k < 4; ++k)
+                vertex.color |= unsigned(std::round(std::clamp(v.channels[3][k], 0.f, 1.f) * 255))
+                                << (8 * k);
+            mesh.vertices.push_back(vertex);
+        }
+        for (auto index : part.indices)
+            mesh.indices.push_back(offset + index);
+    }
+    for (std::size_t i = 0; i < result.meshes.size(); ++i) {
+        validate_authored_mesh(result.meshes[i]);
+        for (std::size_t face = 0; face < result.meshes[i].indices.size() / 3; ++face)
+            result.faces[i].push_back(narrow(face));
+    }
+    return result;
 }
 ProjectAsset begin_project_asset(std::size_t source, const Environment &scene) {
     ProjectAsset asset;

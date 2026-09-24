@@ -23,6 +23,15 @@ enum class SpatialKind {
     Actor,
     Pickup,
     Encounter,
+    FieldAction,
+    SpecialEncounter,
+    Pedestrian,
+    Berry,
+    Fishing,
+    PhotoSpot,
+    Contact,
+    RockPuzzle,
+    AmbientSound,
     Count
 };
 const char *spatial_kind_name(SpatialKind kind);
@@ -37,6 +46,7 @@ struct CollisionSource {
     Bytes original;
 };
 struct OverworldReference {
+    std::uint64_t editor_id = 0;
     unsigned category = 0, local_zone = 0, row = 0, event = 0, script = 0, version = 0,
              condition = 0, value = 0, style = 0;
     unsigned item = 0, quantity = 0, appearance = 0;

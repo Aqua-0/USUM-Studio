@@ -7,8 +7,14 @@
 #include "core/game_profile.h"
 namespace studio {
 struct TargetProfile {
+    static constexpr unsigned pedestrian_placement_pack = 9, pedestrian_record_type = 9,
+                              pedestrian_record_size = 24, pedestrian_point_capacity = 16;
     static constexpr unsigned encounter_placement_pack = 6, encounter_record_type = 6,
                               encounter_table_slot = 9, encounter_actor_capacity = 16;
+    static constexpr const char *trainer_records_archive = "romfs/a/1/0/6",
+                                *trainer_teams_archive = "romfs/a/1/0/7";
+    static constexpr unsigned trainer_names_member = 110, trainer_classes_member = 111,
+                              trainer_record_size = 20, trainer_pokemon_size = 32;
     static constexpr unsigned saved_event_flag_count = 4928;
     static constexpr const char *battle_arenas_archive = "romfs/a/0/8/1",
                                 *battle_trainers_archive = "romfs/a/1/7/4";
@@ -66,6 +72,7 @@ struct TargetProfile {
         {{3, 10, -1, -1}, {2, -1, -1, -1}, {0, 5, 6, -1}, {1, 7, -1, 8}, {4, 11, 12, -1}}};
     static constexpr const char *resident_archive = "romfs/a/1/1/5";
     static constexpr unsigned resident_effects = 3;
+    static constexpr unsigned entrance_behavior_resource = 0, entrance_transition_count = 14;
     static constexpr std::array<std::array<unsigned, 4>, 4> weather_boards{
         {{(1u << 1) | (1u << 3), 34, 0, 3},
          {(1u << 1) | (1u << 3), 34, 1, 4},
@@ -73,7 +80,13 @@ struct TargetProfile {
          {1u << 7, 54, 0, 1}}};
     static constexpr std::array<std::array<unsigned, 3>, 4> weather_particles{
         {{1, 34, 5}, {4, 49, 4}, {5, 49, 5}, {6, 49, 2}}};
+    static constexpr const char *script_events_archive = "romfs/a/1/5/9";
+    static constexpr unsigned static_encounters_member = 1, static_encounter_record_size = 56;
     static constexpr unsigned zone_script_slot = 7;
+    static constexpr const char *shared_script_archive = "romfs/a/0/9/2",
+                                *script_routing_archive = "romfs/a/1/4/3";
+    static constexpr unsigned script_routing_member = 0, script_route_size = 10,
+                              first_shared_script = 1000;
     static constexpr const char *interaction_text_archive = "romfs/a/0/4/2";
     static constexpr unsigned pickup_placement_pack = 10, pickup_record_type = 10,
                               position_event_pack = 0, warp_placement_pack = 2,

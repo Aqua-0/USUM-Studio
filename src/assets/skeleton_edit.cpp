@@ -3,17 +3,18 @@
 #include <algorithm>
 #include <set>
 namespace studio {
-Bytes replace_skeleton(View original, const std::vector<Joint> &joints) {
+Bytes replace_skeleton(View original, const std::vector<Joint> &joints, bool keep_existing) {
     auto before = SkinnedModel::parse(original);
     if (before.joints.empty()) {
         require(joints.empty(),
                 "Adding skinning to a static model requires a different shader layout");
         return Bytes(original.begin(), original.end());
     }
-    require(joints.size() >= before.joints.size() && joints.size() <= 255,
+    require(!joints.empty() && (!keep_existing || joints.size() >= before.joints.size()) &&
+                joints.size() <= 255,
             "Keep existing bones; this model supports at most 255 bones");
     std::set<std::string> names;
-    bool changed = joints.size() != before.joints.size();
+    bool changed = !keep_existing || joints.size() != before.joints.size();
     for (std::size_t i = 0; i < joints.size(); ++i) {
         auto &j = joints[i];
         require(!j.name.empty() && j.name.size() < 64 && j.name.find('\0') == std::string::npos &&
@@ -26,7 +27,7 @@ Bytes replace_skeleton(View original, const std::vector<Joint> &joints) {
                         std::isfinite(j.translation[k]),
                     "Bind transforms need finite values and unit scale");
         require((j.flags & 0xfc) == 0, "Unsupported bone flags");
-        if (i < before.joints.size()) {
+        if (keep_existing && i < before.joints.size()) {
             auto &old = before.joints[i];
             require(j.name == old.name && j.flags == old.flags,
                     "Existing bone names and flags must be preserved");
@@ -73,6 +74,9 @@ Bytes replace_skeleton(View original, const std::vector<Joint> &joints) {
     append(out, slice(original, end, metadata_end - end));
     put32(out, 24, narrow(out.size() - 32));
     append(out, slice(original, metadata_end, original.size() - metadata_end));
+    // A full replacement rebuilds the mesh palettes before validating the model.
+    if (!keep_existing)
+        return out;
     auto check = SkinnedModel::parse(out);
     require(check.joints.size() == joints.size(), "Skeleton did not round-trip");
     for (std::size_t i = 0; i < joints.size(); ++i)

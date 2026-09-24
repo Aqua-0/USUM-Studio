@@ -16,5 +16,8 @@ class ModelExchangeEditor {
     int action_ = 0, motion_ = -1;
     std::string owner_, message_;
     std::filesystem::path file_;
+    std::optional<ModelExchange> incoming_;
+    ModelExchange destination_;
+    std::vector<std::size_t> materials_;
 };
 }

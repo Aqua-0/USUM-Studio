@@ -1,5 +1,6 @@
 #include "assets/model_exchange.h"
 #include "assets/skeleton_edit.h"
+#include "assets/model_resources.h"
 #include "core/digest.h"
 #include <algorithm>
 #include <cmath>
@@ -173,6 +174,7 @@ ModelExchange decode_model_exchange(View bytes) {
             auto &mesh = skin.meshes.at(index++);
             ExchangeMesh out;
             out.name = mesh.name;
+            out.source_mesh = index - 1;
             out.influences = mesh.influences;
             out.indices = mesh.indices;
             for (auto a : data.layout.attributes)
@@ -231,23 +233,51 @@ Bytes replace_model_uvs(View original, unsigned channel, const MeshUvEdits &edit
     }
     return result;
 }
-Bytes replace_model_exchange(View original, const ModelExchange &replacement) {
+Bytes replace_model_exchange(View original, const ModelExchange &replacement, bool keep_bones) {
+    require(!replacement.standalone, "Assign game materials before importing a new model");
     auto before = decode_model_exchange(original);
     require(replacement.source == before.source,
             "The source geometry changed after export; export it again before importing");
-    require(replacement.meshes.size() == before.meshes.size(),
-            "Keep the exported mesh slots; edit their vertices and faces");
-    auto bones = replace_skeleton(original, replacement.joints);
+    require(!replacement.meshes.empty() && replacement.meshes.size() < 4096,
+            "Keep at least one mesh and fewer than 4096 mesh parts");
+    auto bones = replace_skeleton(original, replacement.joints, keep_bones);
     auto groups = storage(bones);
+    auto templates = groups;
+    std::vector<std::pair<std::size_t, std::size_t>> locations;
+    for (std::size_t g = 0; g < groups.size(); ++g) {
+        for (std::size_t m = 0; m < groups[g].meshes.size(); ++m)
+            locations.emplace_back(g, m);
+        groups[g].meshes.clear();
+    }
+    std::vector<std::vector<const ExchangeMesh *>> assigned(groups.size());
+    std::vector<const ExchangeMesh *> ordered;
+    bool structure_changed = replacement.meshes.size() != before.meshes.size();
+    for (std::size_t i = 0; i < replacement.meshes.size(); ++i) {
+        const auto &mesh = replacement.meshes[i];
+        auto source = mesh.source_mesh == std::size_t(-1) ? i : mesh.source_mesh;
+        require(source < locations.size(), "Choose an exported source mesh for each new mesh");
+        auto [g, m] = locations[source];
+        groups[g].meshes.push_back(templates[g].meshes[m]);
+        assigned[g].push_back(&mesh);
+        structure_changed |= source != i;
+    }
+    for (const auto &list : assigned)
+        ordered.insert(ordered.end(), list.begin(), list.end());
     std::size_t index = 0;
-    bool changed = bones != Bytes(original.begin(), original.end());
+    bool changed = structure_changed || bones != Bytes(original.begin(), original.end());
     std::array<float, 3> low{INFINITY, INFINITY, INFINITY}, high{-INFINITY, -INFINITY, -INFINITY};
     for (auto &group : groups) {
         std::array<float, 3> mesh_low{INFINITY, INFINITY, INFINITY},
             mesh_high{-INFINITY, -INFINITY, -INFINITY};
+        if (group.meshes.empty())
+            continue;
+        require(group.meshes.size() < 1024, "A mesh group supports fewer than 1024 parts");
+        put32(group.header, 120, narrow(group.meshes.size()));
         for (auto &data : group.meshes) {
-            auto &old = before.meshes.at(index);
-            auto &mesh = replacement.meshes.at(index++);
+            const auto &mesh = *ordered.at(index++);
+            auto input_index = std::size_t(&mesh - replacement.meshes.data());
+            auto source = mesh.source_mesh == std::size_t(-1) ? input_index : mesh.source_mesh;
+            auto &old = before.meshes.at(source);
             require(mesh.name == old.name && mesh.formats == old.formats &&
                         mesh.influences == old.influences,
                     "Keep native mesh names, channels and influence layouts");
@@ -382,11 +412,27 @@ Bytes replace_model_exchange(View original, const ModelExchange &replacement) {
     Bytes out(bones.begin(), bones.begin() + 16);
     index = 0;
     for (auto &section : model.sections) {
+        if (section.kind == "gfmodel") {
+            auto names = model.names;
+            std::set<std::string> removed;
+            for (std::size_t g = 0; g < groups.size(); ++g)
+                if (groups[g].meshes.empty())
+                    removed.insert(text(slice(groups[g].header, 20, 64)));
+            auto erased = std::erase_if(names[3], [&](const std::string &name) {
+                return removed.contains(name);
+            });
+            require(erased == removed.size(), "Deleted mesh group is missing from model metadata");
+            put32(out, 4, narrow(model.sections.size() - groups.size() + names[3].size()));
+            append(out, rebuild_model_metadata(model, names));
+            continue;
+        }
         if (section.kind != "mesh") {
             append(out, slice(bones, section.offset, section.size));
             continue;
         }
         auto &group = groups.at(index++);
+        if (group.meshes.empty())
+            continue;
         Bytes data = group.header;
         unsigned stream_index = 0;
         for (auto &mesh : group.meshes)
@@ -408,31 +454,32 @@ Bytes replace_model_exchange(View original, const ModelExchange &replacement) {
         put32(data, 8, narrow(data.size() - 16));
         append(out, data);
     }
+    auto output_model = Model::parse(out);
     for (unsigned k = 0; k < 3; ++k) {
-        put_float(out, model.bounds_offset + k * 4,
-                  std::min(f32(out, model.bounds_offset + k * 4), low[k]));
-        put_float(out, model.bounds_offset + 16 + k * 4,
-                  std::max(f32(out, model.bounds_offset + 16 + k * 4), high[k]));
+        put_float(out, output_model.bounds_offset + k * 4,
+                  std::min(f32(out, output_model.bounds_offset + k * 4), low[k]));
+        put_float(out, output_model.bounds_offset + 16 + k * 4,
+                  std::max(f32(out, output_model.bounds_offset + 16 + k * 4), high[k]));
     }
     auto checked = decode_model_exchange(out);
     require(checked.meshes.size() == replacement.meshes.size(),
             "Imported mesh count did not round-trip");
     for (unsigned i = 0; i < checked.meshes.size(); ++i) {
-        require(checked.meshes[i].indices == replacement.meshes[i].indices &&
-                    checked.meshes[i].vertices.size() == replacement.meshes[i].vertices.size(),
+        require(checked.meshes[i].indices == ordered[i]->indices &&
+                    checked.meshes[i].vertices.size() == ordered[i]->vertices.size(),
                 "Imported topology did not round-trip");
         for (unsigned v = 0; v < checked.meshes[i].vertices.size(); ++v) {
             auto &actual = checked.meshes[i].vertices[v];
-            auto &expected = replacement.meshes[i].vertices[v];
+            auto &expected = ordered[i]->vertices[v];
             for (unsigned channel = 0; channel < 7; ++channel)
-                for (unsigned k = 0; k < replacement.meshes[i].formats[channel][1]; ++k) {
+                for (unsigned k = 0; k < ordered[i]->formats[channel][1]; ++k) {
                     auto value = expected.channels[channel][k];
-                    if (replacement.meshes[i].formats[channel][0] != 3)
+                    if (ordered[i]->formats[channel][0] != 3)
                         value = std::round(value);
                     require(actual.channels[channel][k] == value,
                             "Imported vertex attributes did not round-trip");
                 }
-            if (replacement.meshes[i].influences) {
+            if (ordered[i]->influences) {
                 auto weights = quantize(expected, replacement.joints.size());
                 for (unsigned k = 0; k < 4; ++k) {
                     require(std::abs(actual.weights[k] - weights[k] / 255.f) < 1e-6f,
@@ -446,9 +493,67 @@ Bytes replace_model_exchange(View original, const ModelExchange &replacement) {
     }
     return out;
 }
+ModelExchange bind_new_model(const ModelExchange &model, const ModelExchange &target,
+                             const std::vector<std::size_t> &materials) {
+    require(model.standalone && !target.standalone, "Choose a new model and a game destination");
+    require(materials.size() == model.meshes.size(),
+            "Assign a game material to each imported part");
+    require(model.joints.empty() || !target.joints.empty(),
+            "Choose a rigged game model for this skeleton, or export static geometry from Blender");
+    ModelExchange result;
+    result.source = target.source;
+    result.joints = model.joints.empty() ? target.joints : model.joints;
+    auto divisor = [](unsigned format) {
+        return format == 0 ? 127.f : format == 1 ? 255.f : format == 2 ? 32767.f : 1.f;
+    };
+    for (std::size_t i = 0; i < model.meshes.size(); ++i) {
+        const auto &incoming = model.meshes[i];
+        require(materials[i] < target.meshes.size(), "Choose an available game material");
+        const auto &donor = target.meshes[materials[i]];
+        ExchangeMesh mesh = donor;
+        mesh.source_mesh = materials[i];
+        mesh.vertices = incoming.vertices;
+        mesh.indices = incoming.indices;
+        for (auto &v : mesh.vertices) {
+            unsigned influences = 0;
+            float total = 0;
+            for (unsigned k = 0; k < 4; ++k) {
+                require(std::isfinite(v.weights[k]) && v.weights[k] >= 0 && v.weights[k] <= 1,
+                        "Invalid new model weight");
+                if (v.weights[k] > 0) {
+                    require(v.joints[k] < model.joints.size(),
+                            "New model references a missing bone");
+                    ++influences;
+                    total += v.weights[k];
+                }
+            }
+            if (!model.joints.empty())
+                require(influences && std::abs(total - 1.f) < 1e-5f,
+                        "Every rigged vertex needs normalized bone weights");
+            require(
+                influences <= donor.influences,
+                "This material supports fewer bone weights; choose a compatible rigged material");
+            if (model.joints.empty() && donor.influences) {
+                require(!result.joints.empty(), "Destination has skinning without a skeleton");
+                v.joints = {};
+                v.weights = {1, 0, 0, 0};
+            }
+            for (unsigned c = 0; c < 7; ++c) {
+                require(incoming.formats[c][0] == 3,
+                        "New model attributes must use floating point");
+                if (c)
+                    for (auto &value : v.channels[c])
+                        value *= divisor(donor.formats[c][0]);
+            }
+        }
+        result.meshes.push_back(std::move(mesh));
+    }
+    return result;
+}
 std::string serialize_model_exchange(const ModelExchange &exchange) {
     std::ostringstream out;
-    out << "USUMSTUDIO_MODEL 1\nsource " << exchange.source << "\nbones " << exchange.joints.size()
+    out << "USUMSTUDIO_MODEL " << (exchange.standalone ? 3 : 2) << "\nsource "
+        << (exchange.standalone ? "new" : exchange.source) << "\nbones " << exchange.joints.size()
         << '\n'
         << std::setprecision(9);
     for (auto &bone : exchange.joints) {
@@ -465,6 +570,9 @@ std::string serialize_model_exchange(const ModelExchange &exchange) {
             << mesh.vertices.size() << ' ' << mesh.indices.size() << "\nchannels";
         for (auto channel : mesh.formats)
             out << ' ' << channel[0] << ' ' << channel[1];
+        out << "\nsource_mesh "
+            << (mesh.source_mesh == std::size_t(-1) ? std::size_t(&mesh - exchange.meshes.data())
+                                                    : mesh.source_mesh);
         out << "\ntexture " << std::quoted(mesh.texture) << '\n';
         for (auto &vertex : mesh.vertices) {
             out << "vertex";
@@ -495,10 +603,14 @@ ModelExchange parse_model_exchange(const std::string &text) {
     };
     token("USUMSTUDIO_MODEL");
     unsigned version;
-    require(bool(in >> version) && version == 1, "Unsupported model exchange version");
+    require(bool(in >> version) && (version >= 1 && version <= 3),
+            "Unsupported model exchange version");
     ModelExchange out;
     token("source");
-    require(bool(in >> out.source) && out.source.size() == 64, "Missing model fingerprint");
+    require(bool(in >> out.source) &&
+                (version == 3 ? out.source == "new" : out.source.size() == 64),
+            "Missing model identity");
+    out.standalone = version == 3;
     token("bones");
     std::size_t count;
     require(bool(in >> count) && count <= 255, "Invalid imported bone count");
@@ -531,6 +643,11 @@ ModelExchange parse_model_exchange(const std::string &text) {
         for (auto &channel : mesh.formats)
             require(bool(in >> channel[0] >> channel[1]) && channel[0] <= 3 && channel[1] <= 4,
                     "Invalid imported vertex channel");
+        mesh.source_mesh = i;
+        if (version >= 2) {
+            token("source_mesh");
+            require(bool(in >> mesh.source_mesh) && mesh.source_mesh < 4096, "Invalid source mesh");
+        }
         token("texture");
         require(bool(in >> std::quoted(mesh.texture)), "Invalid preview texture path");
         mesh.vertices.resize(vertices);

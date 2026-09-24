@@ -195,6 +195,8 @@ void apply(SceneMaterial &m, const MaterialEdit &edit) {
     m.alpha_reference = edit.alpha_reference;
     m.blend_state = edit.blend;
     m.depth_state = edit.depth;
+    m.layer = edit.layer;
+    m.priority = edit.priority;
     m.fragment_lighting = edit.fragment_lighting;
     m.edge_type = edit.edge_type;
     m.edge_id = edit.edge_id;
@@ -344,6 +346,8 @@ MaterialDocument::MaterialDocument(ModelDocument document) : model(std::move(doc
             edit.alpha_reference = m.alpha_reference;
             edit.blend = m.blend_state;
             edit.depth = m.depth_state;
+            edit.layer = m.layer;
+            edit.priority = m.priority;
             edit.fragment_lighting = m.fragment_lighting;
             edit.edge_type = m.edge_type;
             edit.edge_id = m.edge_id;
@@ -379,7 +383,11 @@ std::string MaterialDocument::identity() const {
     auto &link = model_link(model);
     auto &source = model.sources.at(link.source);
     std::ostringstream out;
+    if (model.project_asset)
+        out << "project_asset " << model.area << ' ';
     out << source.archive.generic_string() << ' ' << source.member;
+    if (model.battle_effect)
+        out << " subfile " << source.subfile;
     for (auto child : link.path)
         out << ' ' << child;
     return out.str();
@@ -429,6 +437,10 @@ void MaterialDocument::preview(std::size_t index, const MaterialEdit &edit) {
             require(t.transform == original.textures[i].transform,
                     "Projected and environment coordinates are read-only");
     }
+    require((edit.layer == initial_[index].layer || (edit.layer >= 0 && edit.layer <= 7)) &&
+                (edit.priority == initial_[index].priority ||
+                 (edit.priority >= 0 && edit.priority <= 7)),
+            "Draw layer and priority must be between 0 and 7");
     require((edit.blend & 255) < 5 && ((edit.blend >> 8) & 255) < 5, "Invalid blend equation");
     for (unsigned i = 16; i < 32; i += 4)
         require(((edit.blend >> i) & 15) < 15, "Invalid blend factor");
@@ -800,9 +812,46 @@ void MaterialDocument::discard() {
     commit();
     synchronize();
 }
+void MaterialDocument::import_native_members(const std::map<std::size_t, Bytes> &members) {
+    commit();
+    replace_members(members);
+}
+std::vector<Bytes> MaterialDocument::package_members() const {
+    std::vector<Bytes> out;
+    const auto compiled = compiled_members();
+    for (const auto &source : model.sources) {
+        auto found = compiled.find(source.member);
+        out.push_back(source.archive == archive_path() && found != compiled.end()
+                          ? found->second
+                          : source.original);
+    }
+    const auto &link = model_link(model);
+    out[link.source] = replace_asset_resource(out[link.source], link.path, compile());
+    for (const auto &[name, index] : model.texture_resources) {
+        const auto &resource = model.resources.at(index);
+        out[resource.source] =
+            replace_asset_resource(out[resource.source], resource.path, texture_resource(name));
+    }
+    for (unsigned i = 0; i < edits_.size(); ++i)
+        if (edits_[i].combiners) {
+            const auto &resource = fragment_link(i);
+            auto path = resource.path;
+            path.pop_back();
+            auto &bytes = out[resource.source];
+            bytes = replace_asset_resource(bytes, path,
+                                           upsert_fragment(asset_resource(bytes, path),
+                                                           fragment_name(edits_[i]),
+                                                           fragment_resource(i)));
+        }
+    for (const auto &[index, bytes] : map_motion_edits_) {
+        const auto &resource = model.resources.at(model.motions.at(index).resource);
+        out[resource.source] = replace_asset_resource(out[resource.source], resource.path, bytes);
+    }
+    return out;
+}
 std::map<std::size_t, Bytes> MaterialDocument::compiled_members() const {
     std::map<std::size_t, Bytes> result;
-    if (model.area >= 0) {
+    if (model.area >= 0 && !model.project_asset) {
         for (const auto &source : model.sources)
             if (source.archive == archive_path() &&
                 (source.member == model.sources.at(model_link(model).source).member ||
@@ -838,6 +887,12 @@ std::map<std::size_t, Bytes> MaterialDocument::compiled_members() const {
                                          edit == texture_edits_.end() ? View(original)
                                                                       : View(*edit->second));
     }
+    if (model.project_asset)
+        for (const auto &[index, bytes] : map_motion_edits_) {
+            const auto &resource = model.resources.at(model.motions.at(index).resource);
+            auto &current = member(resource.source);
+            current = replace_asset_resource(current, resource.path, bytes);
+        }
     for (auto mask : touched_refresh_) {
         auto &resource = model.resources.at(model.refresh_resources.at(mask));
         auto &bytes = member(resource.source);
@@ -889,7 +944,7 @@ void MaterialDocument::replace_members(const std::map<std::size_t, Bytes> &input
         }
     auto previous = compiled_members();
     MaterialDocument next(reload_editable_model(model, members));
-    if (model.area >= 0) {
+    if (model.area >= 0 && !model.project_asset) {
         next.edits_ = edits_;
         next.touched_ = touched_;
         next.texture_edits_ = texture_edits_;
@@ -960,7 +1015,7 @@ ModelExchange MaterialDocument::model_exchange() const {
 }
 FaceMaterialEdit MaterialDocument::assign_material_faces(const MaterialFaces &faces,
                                                          std::size_t material) {
-    require(model.area < 0 && !model.clothing, "Open an individual model to assign face materials");
+    require(!model.clothing, "Open an individual model to assign face materials");
     require(material < model.scene->materials.size(), "Choose a material in this model");
     auto link = model_link(model);
     auto source = model.sources.at(link.source);
@@ -1070,7 +1125,7 @@ void MaterialDocument::import_motion_exchange(std::size_t index,
     replace_members(members);
 }
 void MaterialDocument::edit_uvs(unsigned channel, const MeshUvEdits &edits) {
-    require(model.area < 0 && !model.clothing, "Open an individual model to edit UVs");
+    require((model.area < 0 || model.project_asset) && !model.clothing, "Open an individual model to edit UVs");
     auto link = model_link(model);
     auto source = model.sources.at(link.source);
     auto members = compiled_members();
@@ -1096,6 +1151,59 @@ void MaterialDocument::import_model_exchange(const ModelExchange &replacement) {
     if (bytes == original)
         return;
     members[source.member] = replace_asset_resource(member, link.path, bytes);
+    commit();
+    replace_members(members);
+}
+void MaterialDocument::import_new_model(const ModelExchange &replacement,
+                                        const std::vector<std::size_t> &materials) {
+    require(!model.clothing, "Open an individual model in Studio");
+    auto link = model_link(model);
+    auto source = model.sources.at(link.source);
+    auto members = compiled_members();
+    auto found = members.find(source.member);
+    auto member = found == members.end() ? source.original : found->second;
+    auto original = asset_resource(member, link.path);
+    auto bound = bind_new_model(replacement, decode_model_exchange(original), materials);
+    auto bytes = replace_model_exchange(original, bound, replacement.joints.empty());
+    auto updated = replace_asset_resource(member, link.path, bytes);
+    if (model.is_pokemon() && !replacement.joints.empty()) {
+        require(!model.shadow_model, "Import a new skeleton into the main model first");
+        auto pack = Container::parse(updated, "PC");
+        if (pack.files.size() > 1 && !pack.files[1].empty()) {
+            auto shadow = decode_model_exchange(pack.files[1]);
+            auto old_joints = shadow.joints;
+            shadow.joints = bound.joints;
+            for (auto &mesh : shadow.meshes)
+                for (auto &vertex : mesh.vertices) {
+                    std::map<unsigned, float> weights;
+                    for (unsigned k = 0; k < 4; ++k)
+                        if (vertex.weights[k] > 0) {
+                            const auto &name = old_joints.at(vertex.joints[k]).name;
+                            auto found = std::find_if(bound.joints.begin(), bound.joints.end(),
+                                                      [&](const auto &bone) {
+                                                          return bone.name == name;
+                                                      });
+                            auto joint = found == bound.joints.end()
+                                             ? 0u
+                                             : unsigned(found - bound.joints.begin());
+                            weights[joint] += vertex.weights[k];
+                        }
+                    vertex.joints = {};
+                    vertex.weights = {};
+                    float total = 0;
+                    for (auto [joint, weight] : weights)
+                        total += weight;
+                    unsigned k = 0;
+                    for (auto [joint, weight] : weights) {
+                        vertex.joints[k] = std::uint16_t(joint);
+                        vertex.weights[k++] = weight / total;
+                    }
+                }
+            auto shadow_bytes = replace_model_exchange(pack.files[1], shadow, false);
+            updated = replace_asset_resource(updated, {1}, shadow_bytes);
+        }
+    }
+    members[source.member] = std::move(updated);
     commit();
     replace_members(members);
 }
@@ -1281,13 +1389,7 @@ std::string MaterialDocument::serialize_materials() const {
     auto &link = model_link(model);
     auto &source = model.sources.at(link.source);
     std::ostringstream out;
-    out << "USUMSTUDIO_MATERIALS "
-        << (!touched_map_motions_.empty() ? 10
-            : !touched_camera_.empty()    ? (touched_camera_ == std::set<unsigned>{9} ? 8 : 9)
-            : touched_feeding_            ? 7
-            : touched_refresh_.empty()    ? 5
-                                          : 6)
-        << "\nidentity " << std::quoted(identity()) << "\nsource "
+    out << "USUMSTUDIO_MATERIALS " << 11 << "\nidentity " << std::quoted(identity()) << "\nsource "
         << sha256(asset_resource(source.original, link.path)) << "\nstructure "
         << structure_hash(asset_resource(source.original, link.path)) << '\n'
         << std::setprecision(9);
@@ -1352,6 +1454,7 @@ std::string MaterialDocument::serialize_materials() const {
                 << ' ' << e.depth << ' ' << e.fragment_lighting << '\n';
             out << "outlines " << e.edge_type << ' ' << e.id_edge_enabled << ' ' << e.edge_id << ' '
                 << e.edge_alpha_mask << '\n';
+            out << "draw_order " << e.layer << ' ' << e.priority << '\n';
             for (auto &c : e.colors) {
                 out << "color";
                 for (float v : c)
@@ -1454,7 +1557,7 @@ void MaterialDocument::restore(const std::string &text) {
     std::string word, id, hash;
     unsigned version = 0;
     require(bool(in >> word >> version) && word == "USUMSTUDIO_MATERIALS" &&
-                (version >= 1 && version <= 10),
+                (version >= 1 && version <= 11),
             "Unsupported Studio material document");
     require(bool(in >> word >> std::quoted(id)) && word == "identity" && id == identity(),
             "Open the originating asset before loading this document");
@@ -1591,6 +1694,11 @@ void MaterialDocument::restore(const std::string &text) {
                              e.edge_alpha_mask) &&
                             word == "outlines",
                         "Missing material outline settings");
+            e.layer = initial_[index].layer;
+            e.priority = initial_[index].priority;
+            if (version >= 11)
+                require(bool(in >> word >> e.layer >> e.priority) && word == "draw_order",
+                        "Missing material draw order");
             for (auto &c : e.colors) {
                 require(bool(in >> word) && word == "color", "Missing material color");
                 for (auto &v : c)
@@ -1726,6 +1834,8 @@ Bytes MaterialDocument::compile() const {
         material.resize(aligned(material.size(), 16), 255);
         auto header = material.size();
         append(material, slice(b, p, 32));
+        put32(material, header + 4, std::uint32_t(edit.priority));
+        put32(material, header + 12, std::uint32_t(edit.layer));
         Bytes stream(slice(b, p + 32, u32(b, p)).begin(), slice(b, p + 32, u32(b, p)).end());
         for (auto c : commands(stream))
             if (c.reg == 0x23d) {
@@ -1829,17 +1939,23 @@ void MaterialDocument::write_targets(
         bool exists = std::filesystem::exists(destination);
         require(!exists || replace_existing, "Destination archive already exists");
         Archive archive(exists ? destination : model.archive_sources.resolve(model.dump, relative));
+        auto subfile = [&](std::size_t index) {
+            for (const auto &source : model.sources)
+                if (source.archive == relative && source.member == index)
+                    return source.subfile;
+            return 0u;
+        };
         std::map<std::size_t, Bytes> decoded;
         auto member = [&](std::size_t index) -> Bytes & {
             auto [it, added] = decoded.try_emplace(index);
             if (added)
-                it->second = archive.decoded(index);
+                it->second = archive.decoded(index, subfile(index));
             return it->second;
         };
         if (structural_ && relative == model_archive) {
             auto replacements = compiled_members();
             for (auto &[index, bytes] : replacements) {
-                auto current = archive.decoded(index);
+                auto current = archive.decoded(index, subfile(index));
                 auto digest = sha256(current);
                 require(structural_->accepted[index].contains(digest) || current == bytes,
                         "This model resource has other changes; use a fresh override folder or "
@@ -1848,8 +1964,9 @@ void MaterialDocument::write_targets(
             }
         }
         if ((!structural_ || model.area >= 0) && relative == model_archive) {
-            auto current = structural_ && model.area >= 0 ? member(model_member)
-                                                          : archive.decoded(model_member);
+            auto current = structural_ && model.area >= 0
+                               ? member(model_member)
+                               : archive.decoded(model_member, subfile(model_member));
             auto target = asset_resource(current, link.path);
             require(compatible_model(target), "Destination model geometry or resource layout "
                                               "differs; choose the matching game archive");
@@ -1972,11 +2089,11 @@ void MaterialDocument::write_targets(
         }
         if (decoded.empty())
             continue;
-        std::map<std::size_t, Bytes> replacements;
+        std::map<std::pair<std::size_t, unsigned>, Bytes> replacements;
         for (auto &[index, bytes] : decoded) {
-            auto raw = archive.raw(index);
+            auto raw = archive.raw(index, subfile(index));
             bool compressed = !raw.empty() && (raw[0] == 0x11 || raw[0] == 0x10);
-            replacements[index] = compressed ? compress(bytes) : std::move(bytes);
+            replacements[{index, subfile(index)}] = compressed ? compress(bytes) : std::move(bytes);
         }
         auto temp = destination;
         temp += ".studio-writing";
@@ -1986,7 +2103,7 @@ void MaterialDocument::write_targets(
                            exists ? std::filesystem::last_write_time(destination)
                                   : std::filesystem::file_time_type{},
                            exists ? std::filesystem::file_size(destination) : 0});
-        archive.export_to(temp, replacements);
+        archive.export_subfiles(temp, replacements);
     }
     for (auto &p : pending)
         require(std::filesystem::exists(p.path) == p.existed &&
@@ -2004,7 +2121,7 @@ void MaterialDocument::write_targets(
             auto &source = model.sources.at(link.source);
             Archive written(targets.at(source.archive));
             accepted_map_motions_[index].insert(
-                sha256(asset_resource(written.decoded(source.member), link.path)));
+                sha256(asset_resource(written.decoded(source.member, source.subfile), link.path)));
         }
         for (auto slot : touched_camera_)
             accepted_camera_[slot].insert(feeding_camera_key(model.refresh_feeding->cameras[slot]));
@@ -2026,11 +2143,13 @@ void MaterialDocument::write_targets(
 }
 void MaterialDocument::write_archive(const std::filesystem::path &destination,
                                      bool replace_existing) const {
+    require(!model.project_asset, "Save this asset to its composition, then stage or build the project");
     require(archive_paths().size() == 1,
             "These edits span multiple archives; choose an override folder or working dump");
     write_targets({{*archive_paths().begin(), destination}}, replace_existing);
 }
 void MaterialDocument::write_to_dump(const std::filesystem::path &dump) const {
+    require(!model.project_asset, "Save this asset to its composition, then stage or build the project");
     std::map<std::filesystem::path, std::filesystem::path> targets;
     for (auto &path : archive_paths()) {
         require(std::filesystem::is_regular_file(dump / path),
@@ -2040,6 +2159,7 @@ void MaterialDocument::write_to_dump(const std::filesystem::path &dump) const {
     write_targets(targets, true);
 }
 void MaterialDocument::export_to(const std::filesystem::path &folder, bool replace_existing) const {
+    require(!model.project_asset, "Save this asset to its composition, then stage or build the project");
     auto relative = std::filesystem::weakly_canonical(folder).lexically_relative(
         std::filesystem::weakly_canonical(model.dump));
     require(relative.empty() || *relative.begin() == "..",

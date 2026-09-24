@@ -1,6 +1,7 @@
 #pragma once
 #include "core/binary.h"
 #include "core/game_profile.h"
+#include "core/source_inventory.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -8,6 +9,7 @@
 namespace studio {
 struct ProjectEdit {
     std::string key, kind, label, parameters, blob;
+    bool replay_staged = false; // Export context only; never saved in a project record.
     bool operator==(const ProjectEdit &) const = default;
 };
 struct ProjectChange {
@@ -36,11 +38,33 @@ struct ProjectBuildResult {
 using ProjectExporter =
     std::function<void(const ProjectEdit &, const std::filesystem::path &,
                        const std::filesystem::path &, const std::filesystem::path &)>;
+struct ExternalEditChange {
+    ProjectChange incoming;
+    bool conflict = false;
+    int choice = 0; // 0: import, 1: keep project, 2: decide later.
+};
+struct ExternalEditReview {
+    std::string state, overlay, baseline;
+    std::filesystem::path directory;
+    std::vector<ExternalEditChange> changes;
+    std::vector<std::string> notes;
+    std::shared_ptr<void> resources;
+};
+struct ExternalEditConnection {
+    std::filesystem::path directory;
+    std::string baseline;
+};
 class ProjectStore {
   public:
     static ProjectStore create(const std::filesystem::path &root,
-                               const std::filesystem::path &original);
-    static ProjectStore open(const std::filesystem::path &root);
+                               const std::filesystem::path &original,
+                               const SourceProgress &progress = {});
+    static ProjectStore open(const std::filesystem::path &root, bool trust_legacy_source = false,
+                             const SourceProgress &progress = {});
+    bool uses_content_hashes() const;
+    void verify_original(bool full = false, const SourceProgress &progress = {}) const;
+    void upgrade_source_verification(bool trust_current = false,
+                                     const SourceProgress &progress = {});
     std::filesystem::path root, original, source;
     unsigned format_version = 2;
     GameTarget target = GameTarget::UltraMoon;
@@ -70,6 +94,11 @@ class ProjectStore {
     void collect();
     void import_file(const std::filesystem::path &relative, const std::filesystem::path &file,
                      bool allow_append = false);
+    ExternalEditConnection external_connection() const;
+    void connect_external(const std::filesystem::path &directory, bool create_copy);
+    ExternalEditReview scan_external();
+    std::size_t update_external();
+    void import_external(const ExternalEditReview &review);
     void reset_original(const ProjectChange &change);
     std::vector<ProjectChange> changes() const;
     static ProjectBuildResult stage(const ProjectBuild &build, const ProjectExporter &exporter);

@@ -1,6 +1,7 @@
 #pragma once
 #include "field/archive_sources.h"
 #include "scene/spatial.h"
+#include <optional>
 namespace studio {
 struct WarpShape {
     unsigned type = 0;
@@ -14,11 +15,20 @@ struct WarpRecord {
 struct WarpValues {
     SpatialPoint position{}, arrival{};
     std::array<float, 4> rotation{};
-    unsigned destination_zone = 0, destination_event = 0;
+    unsigned destination_zone = 0, destination_event = 0, transition_type = 0;
 };
+struct EntranceBehavior {
+    std::string name;
+    unsigned activation = 0;
+    bool center_arrival = false;
+    unsigned sound = 0;
+};
+std::vector<EntranceBehavior> load_entrance_behaviors(const std::filesystem::path &dump,
+                                                      const ArchiveSources &sources = {});
 struct WarpDestination {
     unsigned area = 0, zone = 0, event = 0;
     std::string label;
+    std::optional<std::pair<unsigned, unsigned>> destination;
 };
 std::vector<WarpDestination> load_warp_destinations(const std::filesystem::path &dump,
                                                     const ArchiveSources &sources = {});
@@ -32,6 +42,9 @@ class WarpDocument {
     void set(unsigned index, const WarpValues &values);
     float shape_value(const WarpShape &shape, unsigned component) const;
     void set_shape(unsigned index, unsigned shape, unsigned component, float value);
+    unsigned duplicate(unsigned index);
+    void remove(unsigned index);
+    void change_shape_type(unsigned index, unsigned shape, unsigned type);
     void commit();
     void cancel();
     void undo();
@@ -46,7 +59,7 @@ class WarpDocument {
         return current_ != saved_;
     }
     bool changed() const {
-        return current_ != original_;
+        return current_ != source_;
     }
     void mark_saved() {
         saved_ = current_;
@@ -62,12 +75,21 @@ class WarpDocument {
 
   private:
     void validate(View bytes) const;
+    void reindex();
+    unsigned duplicate(unsigned index, unsigned event);
+    std::vector<unsigned> used_events(unsigned local_zone) const;
+    struct Snapshot {
+        Bytes original, current;
+        std::vector<std::array<unsigned, 4>> operations;
+    };
+    void load_snapshot(const Snapshot &snapshot);
     unsigned area_ = 0;
-    Bytes original_, current_, saved_;
+    Bytes source_, original_, current_, saved_;
+    std::vector<std::array<unsigned, 4>> operations_;
     std::string hash_;
     std::vector<WarpRecord> records_;
     std::vector<std::size_t> allowed_;
-    std::vector<Bytes> history_;
+    std::vector<Snapshot> history_;
     std::size_t cursor_ = 0;
 };
 }

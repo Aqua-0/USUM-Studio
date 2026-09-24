@@ -1,6 +1,8 @@
+#include "assets/asset_package.h"
 #include "native/tutorial_widgets.h"
 #include "native/map_authoring_workspace.h"
 #include "core/digest.h"
+#include "authoring/object_export.h"
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cctype>
@@ -47,6 +49,7 @@ AuthoringGrid template_grid(const Environment &scene) {
 MapAuthoringWorkspace::MapAuthoringWorkspace(const std::filesystem::path &shaders,
                                              SDL_Window *window)
     : window_(window), renderer_(shaders), shaders_(shaders) {
+    renderer_.retain_frame_during_upload = true;
     renderer_.lighting.enabled = true;
     renderer_.characters_enabled = false;
     renderer_.sky_enabled = false;
@@ -61,6 +64,8 @@ MapAuthoringWorkspace::~MapAuthoringWorkspace() {
         resource_job_.wait();
     if (library_job_.valid())
         library_job_.wait();
+    if (surface_job_.valid())
+        surface_job_.wait();
     if (review_job_.valid())
         review_job_.wait();
 }
@@ -77,7 +82,7 @@ void MapAuthoringWorkspace::open_template(const std::filesystem::path &requested
         std::string magic, key;
         unsigned version;
         require(bool(header >> magic >> version >> key >> area) &&
-                    magic == "USUMSTUDIO_COMPOSITION" && version >= 1 && version <= 13 &&
+                    magic == "USUMSTUDIO_COMPOSITION" && version >= 1 && version <= 15 &&
                     key == "area",
                 "Unsupported composition document");
     }
@@ -114,7 +119,7 @@ void MapAuthoringWorkspace::open_template(const std::filesystem::path &requested
             std::string magic, key;
             unsigned version = 0;
             require(bool(in >> magic >> version >> key >> selected_area) &&
-                        magic == "USUMSTUDIO_COMPOSITION" && (version >= 1 && version <= 13) &&
+                        magic == "USUMSTUDIO_COMPOSITION" && (version >= 1 && version <= 15) &&
                         key == "area",
                     "Unsupported composition document");
         }
@@ -133,15 +138,22 @@ void MapAuthoringWorkspace::open_template(const std::filesystem::path &requested
             loaded.document->restore(saved);
         loaded.maps = load_map_catalog(dump).locations;
         loaded.textures = load_ground_textures(dump, *loaded.base, &cancel_);
+        for (auto &texture : loaded.textures)
+            loaded.surface_keys.push_back(texture.key);
+        if (loaded.document->ground())
+            restore_ground_textures(dump, *loaded.base, *loaded.document->ground(), loaded.textures,
+                                    &cancel_);
         for (const auto &asset : loaded.document->project_assets()) {
-            if (!loaded.resources.contains(asset.source))
+            if (asset.source != ProjectAsset::no_source && !loaded.resources.contains(asset.source))
                 loaded.resources.emplace(
                     asset.source,
                     preview_map_resource(dump, loaded.document->catalog().entries.at(asset.source),
                                          &cancel_));
-            loaded.resources.emplace(
-                loaded.document->project_resource(asset.id),
-                project_asset_preview(loaded.resources.at(asset.source), asset));
+            loaded.resources.emplace(loaded.document->project_resource(asset.id),
+                                     project_asset_preview(asset.source == ProjectAsset::no_source
+                                                               ? Environment{}
+                                                               : loaded.resources.at(asset.source),
+                                                           asset));
         }
         for (const auto &instance : loaded.document->instances())
             if (!loaded.resources.contains(instance.resource))
@@ -176,6 +188,13 @@ void MapAuthoringWorkspace::load_resource(std::size_t resource) {
     });
 }
 void MapAuthoringWorkspace::poll() {
+    if (!asset_edit_) {
+        try {
+            object_exchange_result();
+        } catch (const std::exception &e) {
+            error_ = e.what();
+        }
+    }
     if (review_job_.valid() &&
         review_job_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         try {
@@ -184,6 +203,21 @@ void MapAuthoringWorkspace::poll() {
         } catch (const std::exception &error) {
             error_ = error.what();
             status_.clear();
+        }
+
+    if (surface_job_.valid() &&
+        surface_job_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        try {
+            auto library = surface_job_.get();
+            merge_ground_textures(*base_, ground_textures_, library.scene, library.textures);
+            auto &keys = surface_keys_[library.area];
+            for (auto &texture : library.textures)
+                keys.push_back(texture.key);
+            surface_area_ = library.area;
+            status_ = "Surface library ready. Select a texture to paint the composition.";
+            error_.clear();
+        } catch (const std::exception &error) {
+            error_ = error.what();
         }
 
     if (library_job_.valid() &&
@@ -214,10 +248,10 @@ void MapAuthoringWorkspace::poll() {
             terrain_box_ = false;
             terrain_click_.reset();
             asset_edit_ = false;
-            stage_ = AuthoringStage::Terrain;
+            stage_ = existing_mode_ ? AuthoringStage::Objects : AuthoringStage::Terrain;
             focus_library_ = true;
-            ground_mode_ = true;
-            library_mode_ = 0;
+            ground_mode_ = !existing_mode_;
+            library_mode_ = existing_mode_ ? 1 : 0;
             ground_transform_tool_ = Height;
             brush_stroke_ = {};
             brush_hover_.reset();
@@ -225,6 +259,9 @@ void MapAuthoringWorkspace::poll() {
             ground_vertex_.reset();
             authoring_base_ = std::move(surface);
             ground_textures_ = std::move(loaded.textures);
+            surface_area_ = loaded.document->catalog().area;
+            surface_keys_.clear();
+            surface_keys_[surface_area_] = std::move(loaded.surface_keys);
             library_maps_ = std::move(loaded.maps);
             library_area_ = loaded.document->catalog().area;
             ground_texture_ = ground_blend_texture_ = -1;
@@ -233,6 +270,8 @@ void MapAuthoringWorkspace::poll() {
             region_end_.reset();
             selecting_ground_ = false;
             base_ = std::move(loaded.base);
+            studio_document_.reset();
+            studio_baseline_.reset();
             document_ = std::move(loaded.document);
             resources_ = std::move(loaded.resources);
             dump_ = std::move(loaded.dump);
@@ -258,7 +297,7 @@ void MapAuthoringWorkspace::poll() {
             ground_ceiling_ =
                 document_->ground() ? authoring_base_->high[1] + 100000 : base_->high[1] + 100;
             cut_height_ = map_camera_.target[1] + 250;
-            renderer_.set_scene(composed_);
+            refresh_scene();
             status_ = path_.empty() ? "Source map ready. Create a flat surface in Ground tools or "
                                       "use Objects to place assets."
                                     : "Composition reopened.";
@@ -289,12 +328,15 @@ void MapAuthoringWorkspace::refresh_scene() {
     collision_renderer_.reset();
     sync_project_assets();
     shown_ = document_->instances();
-    authoring_base_ = document_->ground()
+    auto map_base = existing_mode_ && existing_editor_ && existing_editor_->scene() &&
+                            existing_editor_->area() == document_->catalog().area
+                        ? existing_editor_->scene() : base_;
+    authoring_base_ = !existing_mode_ && document_->ground()
                           ? std::make_shared<Environment>(ground_preview(
                                 *base_, document_->grid(),
                                 ground_drag_preview_ ? *ground_drag_preview_ : *document_->ground(),
                                 ground_textures_))
-                          : base_;
+                          : map_base;
     composed_ =
         std::make_shared<Environment>(compose_map_preview(*authoring_base_, shown_, resources_));
     renderer_.set_scene(composed_);
@@ -341,9 +383,9 @@ void MapAuthoringWorkspace::begin_asset_edit() {
 }
 void MapAuthoringWorkspace::refresh_asset_editor() {
     asset_edit_geometry_ = std::make_shared<Environment>(
-        project_asset_geometry(resources_.at(asset_draft_.source), asset_draft_));
+        project_asset_geometry(asset_source(asset_draft_), asset_draft_));
     auto scene = std::make_shared<Environment>(
-        project_asset_preview(resources_.at(asset_draft_.source), asset_draft_));
+        project_asset_preview(asset_source(asset_draft_), asset_draft_));
     renderer_.set_scene(scene);
     asset_edit_scene_ = std::move(scene);
     std::fill(std::begin(asset_name_), std::end(asset_name_), 0);
@@ -379,7 +421,7 @@ void MapAuthoringWorkspace::trim_asset_faces(bool keep) {
             return asset_faces_selected_.contains({section, face}) != keep;
         });
     validate_project_asset(candidate, document_->catalog());
-    project_asset_preview(resources_.at(candidate.source), candidate);
+    project_asset_preview(asset_source(candidate), candidate);
     asset_draft_ = std::move(candidate);
     remember_asset_edit();
     asset_faces_selected_.clear();
@@ -393,7 +435,7 @@ void MapAuthoringWorkspace::save_asset_edit(bool copy) {
     if (copy)
         candidate.id = 0;
     validate_project_asset(candidate, document_->catalog());
-    project_asset_preview(resources_.at(candidate.source), candidate);
+    project_asset_preview(asset_source(candidate), candidate);
     const auto key = document_->save_project_asset(std::move(candidate));
     asset_edit_ = false;
     asset_box_drag_ = false;
@@ -408,12 +450,16 @@ void MapAuthoringWorkspace::save_asset_edit(bool copy) {
               "to place it.";
     error_.clear();
 }
-void MapAuthoringWorkspace::object_exchange_dialog(bool save) {
+void MapAuthoringWorkspace::object_exchange_dialog(bool save, bool new_model, bool package) {
     if (object_dialog_kind_)
         return;
-    object_dialog_kind_ = save ? 1 : 2;
+    object_dialog_kind_ = package ? (save ? 4 : 5) : new_model ? 3 : save ? 1 : 2;
     auto *owner = new std::shared_ptr<FolderSelection>(object_dialog_);
-    static const SDL_DialogFileFilter filter[] = {{"USUMStudio object", "usum-object"}};
+    static const SDL_DialogFileFilter filters[] = {
+        {"USUMStudio asset or legacy object", "usum-asset;usum-object"},
+        {"New Blender asset or legacy model", "usum-asset;usum-model"},
+        {"USUMStudio asset", "usum-asset"}};
+    const auto *filter = filters + (package ? 2 : new_model ? 1 : 0);
     auto callback = [](void *userdata, const char *const *files, int) {
         std::unique_ptr<std::shared_ptr<FolderSelection>> owner(
             static_cast<std::shared_ptr<FolderSelection> *>(userdata));
@@ -449,45 +495,67 @@ void MapAuthoringWorkspace::object_exchange_result() {
     if (file.empty())
         return;
     auto path = std::filesystem::u8path(file);
+    if (kind == 4) {
+        require(document_ && package_export_, "Choose a project asset to export");
+        if (path.extension().empty())
+            path += ".usum-asset";
+        auto bytes = export_asset_package(dump_, document_->catalog(), *package_export_);
+        write_file_atomic(path, bytes);
+        package_export_.reset();
+        error_.clear();
+        status_ = "Asset exported. Share the .usum-asset file; no sidecar files are needed.";
+        return;
+    }
+    if (kind == 5) {
+        require(bool(document_), "Open a composition before importing an asset");
+        auto asset = import_asset_package(read_file(path));
+        const auto base_name = asset.name;
+        unsigned suffix = 2;
+        while (std::any_of(document_->project_assets().begin(), document_->project_assets().end(),
+                           [&](const auto &a) {
+                               return a.name == asset.name;
+                           }))
+            asset.name = base_name.substr(0, 100) + " (" + std::to_string(suffix++) + ")";
+        const auto key = document_->save_project_asset(std::move(asset));
+        sync_project_assets();
+        set_stage(AuthoringStage::Objects);
+        load_resource(key);
+        error_.clear();
+        status_ = "Asset imported. Place it on the map or choose Edit in Studio.";
+        return;
+    }
+    if (kind == 3) {
+        auto bytes = read_file(path);
+        auto incoming = parse_model_exchange(
+            is_asset_package(bytes) ? text(decode_asset_package(bytes).at("models/0.usum-model"))
+                                    : text(bytes));
+        require(incoming.standalone && incoming.joints.empty(),
+                "Use Blender’s new-model export with unrigged meshes for a static asset");
+        new_object_materials_.assign(incoming.meshes.size(), 0);
+        new_object_ = std::move(incoming);
+        ImGui::OpenPopup("Import new static model");
+        return;
+    }
     if (kind == 1) {
         if (path.extension().empty())
-            path += ".usum-object";
-        const auto &source = resources_.at(asset_draft_.source);
-        const auto identity =
-            document_->catalog().entries.at(asset_draft_.source).source.member_hash +
-            document_->serialize() + export_object_exchange(source, asset_draft_, "");
-        const auto signature =
-            sha256(View(reinterpret_cast<const std::uint8_t *>(identity.data()), identity.size()));
-        const auto texture_folder = path.parent_path() / (path.stem().string() + "-textures");
-        std::vector<std::string> textures(source.draws.size());
-        for (std::size_t i = 0; i < source.draws.size(); ++i) {
-            const auto &material = source.materials.at(source.draws[i].material);
-            auto found = source.textures.find(material.texture);
-            if (found == source.textures.end())
-                continue;
-            std::filesystem::create_directories(texture_folder);
-            const auto name = "section-" + std::to_string(i) + ".tga";
-            write_file_atomic(texture_folder / name, write_tga(found->second));
-            textures[i] = (texture_folder.filename() / name).generic_string();
-        }
-        const auto text = export_object_exchange(source, asset_draft_, signature, textures);
-        require(text.size() <= 32 * 1024 * 1024,
-                "Object export exceeds 32 MiB; trim unused geometry first");
-        write_file_atomic(path,
-                          View(reinterpret_cast<const std::uint8_t *>(text.data()), text.size()));
-        object_exchange_signature_ = signature;
+            path += ".usum-asset";
+        write_file_atomic(path, export_asset_package(dump_, document_->catalog(), asset_draft_));
         object_exchange_state_ = asset_draft_;
         object_exchange_path_ = path.string();
-        status_ =
-            "Object exported. Import it with the Objects section of the USUMStudio Blender add-on.";
+        status_ = "Asset exported. Open it with the USUMStudio model add-on in Blender.";
     } else {
         require(object_exchange_state_ && *object_exchange_state_ == asset_draft_,
                 "Object changed since export/import. Undo those edits or export a fresh Blender "
                 "object first.");
-        const auto candidate = import_object_exchange(read_composition(path), asset_draft_,
-                                                      object_exchange_signature_);
+        const auto bytes = read_file(path);
+        auto candidate =
+            is_asset_package(bytes)
+                ? import_asset_package(bytes)
+                : import_object_exchange(text(bytes), asset_draft_, object_exchange_signature_);
+        candidate.id = asset_draft_.id;
+        candidate.name = asset_draft_.name;
         validate_project_asset(candidate, document_->catalog());
-        project_asset_preview(resources_.at(candidate.source), candidate);
+        project_asset_preview(asset_source(candidate), candidate);
         asset_draft_ = candidate;
         object_exchange_state_ = candidate;
         asset_faces_selected_.clear();
@@ -499,9 +567,69 @@ void MapAuthoringWorkspace::object_exchange_result() {
     }
     error_.clear();
 }
+void MapAuthoringWorkspace::new_object_import() {
+    ImGui::SetNextWindowSize(ImVec2(620, 450), ImGuiCond_FirstUseEver);
+    if (!ImGui::BeginPopupModal("Import new static model", nullptr, ImGuiWindowFlags_None))
+        return;
+    if (new_object_) {
+        const auto source = project_asset_geometry(asset_source(asset_draft_), asset_draft_);
+        ImGui::TextWrapped(
+            "Assign game materials to the new Blender geometry. This edits the asset draft; save "
+            "it to the asset library to place it on the map. The source map model is unchanged.");
+        ImGui::BeginChild("Static import assignments", ImVec2(0, -85));
+        auto label = [&](std::size_t i) {
+            return source.draws[i].mesh + " / " +
+                   source.materials.at(source.draws[i].material).name;
+        };
+        for (std::size_t i = 0; i < new_object_->meshes.size(); ++i) {
+            ImGui::PushID(int(i));
+            ImGui::TextWrapped("%s", new_object_->meshes[i].name.c_str());
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##Game material", label(new_object_materials_[i]).c_str())) {
+                for (std::size_t j = 0; j < source.draws.size(); ++j)
+                    if (ImGui::Selectable((label(j) + "##" + std::to_string(j)).c_str(),
+                                          new_object_materials_[i] == j))
+                        new_object_materials_[i] = j;
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        if (!error_.empty())
+            ImGui::TextWrapped("%s", error_.c_str());
+        if (ImGui::Button("Import geometry")) {
+            try {
+                auto candidate =
+                    import_new_project_asset(*new_object_, asset_draft_, new_object_materials_);
+                validate_project_asset(candidate, document_->catalog());
+                project_asset_preview(source, candidate);
+                asset_draft_ = std::move(candidate);
+                object_exchange_state_.reset();
+                asset_faces_selected_.clear();
+                refresh_asset_editor();
+                remember_asset_edit();
+                asset_camera_.fit(asset_edit_scene_->low, asset_edit_scene_->high);
+                new_object_.reset();
+                error_.clear();
+                status_ = "New static model imported. Name it and save to the asset library, then "
+                          "place it on the map.";
+                ImGui::CloseCurrentPopup();
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            new_object_.reset();
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::EndPopup();
+}
 void MapAuthoringWorkspace::asset_editor(std::uint32_t frame) {
     try {
         object_exchange_result();
+        new_object_import();
     } catch (const std::exception &e) {
         error_ = e.what();
     }
@@ -521,7 +649,7 @@ void MapAuthoringWorkspace::asset_editor(std::uint32_t frame) {
     ImGui::SameLine();
     if (studio::TutorialWidgets::Button("map_authoring_workspace", "Clear"))
         asset_faces_selected_.clear();
-    const auto &source = resources_.at(asset_draft_.source);
+    const auto &source = *asset_edit_geometry_;
     ImGui::InputTextWithHint("##mesh-section-search", "Find mesh or material",
                              asset_section_search_, sizeof(asset_section_search_));
     ImGui::BeginChild("Sections");
@@ -603,7 +731,7 @@ void MapAuthoringWorkspace::asset_editor(std::uint32_t frame) {
             auto candidate = asset_draft_;
             candidate.pivot = pivot;
             validate_project_asset(candidate, document_->catalog());
-            project_asset_preview(resources_.at(candidate.source), candidate);
+            project_asset_preview(asset_source(candidate), candidate);
             for (unsigned a = 0; a < 3; ++a)
                 asset_camera_.target[a] += asset_draft_.pivot[a] - candidate.pivot[a];
             asset_draft_ = std::move(candidate);
@@ -622,21 +750,24 @@ void MapAuthoringWorkspace::asset_editor(std::uint32_t frame) {
         if (undo || redo)
             asset_edit_history(redo);
         if (studio::TutorialWidgets::CollapsingHeader("map_authoring_workspace",
-                                                      "Blender object exchange")) {
+                                                      "Blender asset exchange")) {
             ImGui::TextWrapped(
                 "Export this object, edit it with the USUMStudio Blender add-on, then import the "
                 "edited file. UVs and source material assignments are retained.");
             ImGui::BeginDisabled(object_dialog_kind_ != 0);
-            if (studio::TutorialWidgets::Button("map_authoring_workspace", "Export object...",
-                                                {-1, 0}))
-                object_exchange_dialog(true);
-            ImGui::BeginDisabled(!object_exchange_state_);
             if (studio::TutorialWidgets::Button("map_authoring_workspace",
-                                                "Import edited object...", {-1, 0}))
+                                                "Export asset for Blender...", {-1, 0}))
+                object_exchange_dialog(true);
+            if (studio::TutorialWidgets::Button("map_authoring_workspace",
+                                                "Import new Blender model...", {-1, 0}))
+                object_exchange_dialog(false, true);
+            ImGui::BeginDisabled(!object_exchange_state_);
+            if (studio::TutorialWidgets::Button("map_authoring_workspace", "Import edited asset...",
+                                                {-1, 0}))
                 object_exchange_dialog(false);
             ImGui::EndDisabled();
             ImGui::EndDisabled();
-            ImGui::TextWrapped("Game textures are copied beside the export for Blender previews. "
+            ImGui::TextWrapped("The asset package includes textures for Blender previews. "
                                "Materials keep their game settings on reimport.");
         }
         ImGui::Separator();
@@ -662,19 +793,13 @@ void MapAuthoringWorkspace::asset_editor(std::uint32_t frame) {
             status_ = "Asset edit canceled.";
             error_.clear();
         }
-        if (asset_edit_ && !ImGui::GetIO().WantTextInput && ImGui::GetIO().KeyCtrl) {
-            if (ImGui::IsKeyPressed(ImGuiKey_Z))
-                asset_edit_history(ImGui::GetIO().KeyShift);
-            if (ImGui::IsKeyPressed(ImGuiKey_Y))
-                asset_edit_history(true);
-        }
     } catch (const std::exception &error) {
         error_ = error.what();
     }
     ImGui::End();
     if (asset_edit_)
         asset_editor_viewport(frame);
-    ImGui::Begin("Authoring status");
+    ImGui::Begin("Authoring tools");
     ImGui::TextWrapped("%s", status_.c_str());
     if (!error_.empty())
         ImGui::TextWrapped("%s", error_.c_str());
@@ -688,7 +813,7 @@ void MapAuthoringWorkspace::sync_project_assets() {
         used.insert(key);
         auto cached = project_cache_.find(key);
         if (cached == project_cache_.end() || cached->second != asset) {
-            resources_[key] = project_asset_preview(resources_.at(asset.source), asset);
+            resources_[key] = project_asset_preview(asset_source(asset), asset);
             project_cache_[key] = asset;
         }
     }
@@ -744,14 +869,14 @@ void MapAuthoringWorkspace::select_instance(std::uint64_t id) {
         refresh_scene();
 }
 void MapAuthoringWorkspace::place_preview() {
-    require(document_ && tile_ && resource_ >= 0 && resources_.contains(std::size_t(resource_)),
-            "Choose an asset and a ground tile first");
+    require(document_ && (existing_mode_ ? bool(surface_position_) : bool(tile_)) && resource_ >= 0 && resources_.contains(std::size_t(resource_)),
+            "Choose an asset and a placement point first");
     require(document_->can_place(std::size_t(resource_)),
             "Extract baked scenery into a project asset before placement");
     require(std::isfinite(height_offset_), "Height offset must be finite");
-    auto ground =
+    auto ground = existing_mode_ ? surface_position_ :
         tile_ground_position(document_->grid(), *tile_, authoring_base_->spatial, ground_ceiling_);
-    if (document_->ground()) {
+    if (!existing_mode_ && document_->ground()) {
         const auto a = ground_vertex(document_->grid(), *document_->ground(), tile_->x,
                                      tile_->z + 1),
                    b = ground_vertex(document_->grid(), *document_->ground(), tile_->x + 1,
@@ -926,6 +1051,99 @@ void MapAuthoringWorkspace::dialogs() {
 void MapAuthoringWorkspace::draw(std::uint32_t frame, const std::filesystem::path &dump,
                                  unsigned selected_area) {
     poll();
+    if (!existing_editor_)
+        existing_editor_ = std::make_unique<ExistingMapEditor>(shaders_, window_);
+    if (!document_ && !existing_editor_->scene()) {
+        focus_library_ = false;
+        if (!authoring_seen_ || frame != last_authoring_frame_ + 1)
+            ImGui::SetNextWindowFocus();
+    }
+    authoring_seen_ = true;
+    last_authoring_frame_ = frame;
+    ImGui::Begin("Composition");
+    ImGui::BeginDisabled(busy() || preview_ || ground_handle_ || existing_editor_->busy());
+    bool changed_mode = false;
+    const bool previous_mode = existing_mode_;
+    if (ImGui::RadioButton("Existing map", existing_mode_)) {
+        changed_mode = !existing_mode_;
+        existing_mode_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Grid terrain", !existing_mode_)) {
+        changed_mode = existing_mode_;
+        existing_mode_ = false;
+    }
+    if (changed_mode) {
+        try {
+            require(save_editor_project(), "Save edits before changing authoring mode");
+            surface_position_.reset();
+            refresh_scene();
+        } catch (const std::exception &e) {
+            existing_mode_ = previous_mode;
+            error_ = e.what();
+        }
+    }
+    ImGui::EndDisabled();
+    if (!error_.empty())
+        ImGui::TextWrapped("%s", error_.c_str());
+    ImGui::End();
+    if (!asset_edit_) {
+        ImGui::Begin("Authoring viewport");
+        ImGui::BeginDisabled(busy() || preview_ || ground_handle_ || existing_editor_->busy());
+        const char *stages[] = {"1  Terrain", "2  Surfaces", "3  Objects", "4  Review"};
+        for (int i = 0; i < 4; ++i) {
+            if (i)
+                ImGui::SameLine();
+            if (int(stage_) == i)
+                ImGui::PushStyleColor(ImGuiCol_Button,
+                                      ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            bool clicked = ImGui::Button(stages[i], {104, 28});
+            if (int(stage_) == i)
+                ImGui::PopStyleColor();
+            if (clicked) {
+                auto previous_stage = stage_;
+                set_stage(AuthoringStage(i));
+                try {
+                    if (existing_mode_ && i < 2 && previous_stage >= AuthoringStage::Objects &&
+                        document_ && existing_editor_->scene() &&
+                        existing_editor_->area() == document_->catalog().area) {
+                        existing_editor_->camera() = map_camera_;
+                        auto instances = document_->instances();
+                        auto resources = resources_;
+                        existing_editor_->context(
+                            [instances = std::move(instances),
+                             resources = std::move(resources)](const Environment &scene) {
+                                return compose_map_preview(scene, instances, resources);
+                            });
+                    }
+                    if (existing_mode_ && i >= 2) {
+                        if ((!document_ ||
+                             (existing_editor_->scene() &&
+                              document_->catalog().area != existing_editor_->area())) &&
+                            !busy())
+                            open_template(dump, existing_editor_->scene() ? existing_editor_->area()
+                                                                          : selected_area);
+                        else {
+                            if (previous_stage < AuthoringStage::Objects &&
+                                existing_editor_->scene())
+                                map_camera_ = existing_editor_->camera();
+                            refresh_scene();
+                        }
+                    }
+                } catch (const std::exception &e) {
+                    error_ = e.what();
+                }
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::Separator();
+        ImGui::End();
+    }
+    if (existing_mode_ && stage_ < AuthoringStage::Objects && !asset_edit_) {
+        existing_editor_->surface_tools(stage_ == AuthoringStage::Surfaces);
+        existing_editor_->draw(frame, dump, selected_area);
+        return;
+    }
     if (asset_edit_) {
         asset_editor(frame);
         return;
@@ -933,12 +1151,12 @@ void MapAuthoringWorkspace::draw(std::uint32_t frame, const std::filesystem::pat
     ImGui::Begin("Composition");
     try {
         ImGui::BeginDisabled(busy() || ground_handle_);
-        if (studio::TutorialWidgets::Button("map_authoring_workspace", "Start from selected map"))
+        if (studio::TutorialWidgets::Button("map_authoring_workspace", "Load selected map"))
             request_leave([this, dump, selected_area] {
                 open_template(dump, selected_area);
             });
-        ImGui::TextWrapped(
-            "Choose the template in Maps. New compositions use the current project source, including staged assets.");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Uses the selected map's original dump resources.");
         if (studio::TutorialWidgets::Button("map_authoring_workspace", "Open composition..."))
             request_leave([this, dump] {
                 if (!document_)
@@ -977,9 +1195,12 @@ void MapAuthoringWorkspace::draw(std::uint32_t frame, const std::filesystem::pat
                         document_->dirty() ? "Unsaved changes"
                         : path_.empty()    ? "Unmodified template"
                                            : "Saved");
-            ImGui::TextWrapped("%s",
-                               path_.empty() ? "Untitled composition" : path_.string().c_str());
-            ImGui::TextWrapped("Dump: %s", dump_.string().c_str());
+            if (ImGui::TreeNode("Document location")) {
+                ImGui::TextWrapped("%s",
+                                   path_.empty() ? "Untitled composition" : path_.string().c_str());
+                ImGui::TextWrapped("Dump: %s", dump_.string().c_str());
+                ImGui::TreePop();
+            }
             ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
             ImGui::BeginDisabled(!document_->can_undo());
             if (studio::TutorialWidgets::Button("map_authoring_workspace", "Undo")) {
@@ -1044,27 +1265,8 @@ void MapAuthoringWorkspace::draw(std::uint32_t frame, const std::filesystem::pat
             io.KeyCtrl) {
             if ((!project_store() && ImGui::IsKeyPressed(ImGuiKey_S, false)))
                 save();
-            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
-                if (io.KeyShift)
-                    document_->redo();
-                else
-                    document_->undo();
-                selected_ = 0;
-                terrain_elements_.clear();
-                terrain_selection_.clear();
-                terrain_box_ = false;
-                grid_edit_ = document_->grid();
-                refresh_scene();
-            }
-            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
-                document_->redo();
-                selected_ = 0;
-                terrain_elements_.clear();
-                terrain_selection_.clear();
-                terrain_box_ = false;
-                grid_edit_ = document_->grid();
-                refresh_scene();
-            }
+
+
         }
     } catch (const std::exception &error) {
         error_ = error.what();
@@ -1074,14 +1276,122 @@ void MapAuthoringWorkspace::draw(std::uint32_t frame, const std::filesystem::pat
     browser();
     details();
     viewport(frame);
-    ImGui::Begin("Authoring status");
+    ImGui::Begin("Authoring tools");
     ImGui::TextWrapped("%s", status_.c_str());
     if (!error_.empty())
         ImGui::TextWrapped("%s", error_.c_str());
-    if (document_)
+    if (document_ && !document_->catalog().issues.empty())
         for (const auto &issue : document_->catalog().issues)
             ImGui::TextWrapped("%s", issue.c_str());
     ImGui::End();
+}
+void MapAuthoringWorkspace::publish_library_asset(bool replace) {
+    auto *store = project_store();
+    require(store && document_ && resource_ >= 0, "Open a project and select a composition asset");
+    capture_asset_studio();
+    auto asset = document_->project_asset(std::size_t(resource_));
+    require(asset != nullptr, "Select a composition asset to publish");
+    const auto asset_name = asset->name;
+    auto package = export_asset_package(dump_, document_->catalog(), *asset);
+    import_asset_package(package);
+    require(save_editor_project(), "Save the composition before publishing its asset");
+    auto key = replace ? library_asset_key_ : "asset-library/" + sha256(package);
+    if (replace)
+        require(store->edits.contains(key) && store->edits.at(key).kind == "asset-library",
+                "Select a project library entry to update");
+    if (!replace) {
+        const auto first_key = key;
+        unsigned suffix = 2;
+        while (store->edits.contains(key) && store->edits.at(key).blob != sha256(package))
+            key = first_key + "/" + std::to_string(suffix++);
+    }
+    auto label = replace ? store->edits.at(key).label : asset_name;
+    if (!replace) {
+        unsigned suffix = 2;
+        while (std::any_of(store->edits.begin(), store->edits.end(), [&](auto &item) {
+            return item.first != key && item.second.kind == "asset-library" &&
+                   item.second.label == label;
+        }))
+            label = asset_name.substr(0, 100) + " (" + std::to_string(suffix++) + ")";
+    }
+    auto previous = store->edits;
+    try {
+        store->capture({key, "asset-library", label, "", {}}, package);
+        store->save();
+    } catch (...) {
+        store->edits = std::move(previous);
+        throw;
+    }
+    library_asset_key_ = key;
+    status_ =
+        replace ? "Project library updated. Existing composition copies retain their current edits."
+                : "Asset published to the project library. Open another composition to add a copy.";
+    error_.clear();
+}
+void MapAuthoringWorkspace::project_library() {
+    ImGui::SeparatorText("Project library");
+    auto *store = project_store();
+    if (!store) {
+        ImGui::TextWrapped("Open a project to share assets between its maps.");
+        return;
+    }
+    if (library_project_root_ != store->root) {
+        library_project_root_ = store->root;
+        library_asset_key_.clear();
+        library_search_[0] = 0;
+    }
+    ImGui::TextDisabled("Available to every composition in this project");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##project-asset-filter", "Find project asset", library_search_,
+                             sizeof(library_search_));
+    unsigned total = 0, visible = 0;
+    ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
+    ImGui::BeginChild("Shared assets", {0, 150}, ImGuiChildFlags_Borders);
+    for (auto &[key, edit] : store->edits) {
+        if (edit.kind != "asset-library")
+            continue;
+        ++total;
+        if (lower(edit.label).find(lower(library_search_)) == std::string::npos)
+            continue;
+        ++visible;
+        ImGui::PushID(key.c_str());
+        if (ImGui::Selectable(edit.label.c_str(), library_asset_key_ == key))
+            library_asset_key_ = key;
+        ImGui::PopID();
+    }
+    if (!total)
+        ImGui::TextWrapped("Select a composition asset, then Publish to project library.");
+    else if (!visible)
+        ImGui::TextDisabled("No matching assets");
+    ImGui::EndChild();
+    auto selected = store->edits.find(library_asset_key_);
+    const bool available =
+        selected != store->edits.end() && selected->second.kind == "asset-library";
+    ImGui::BeginDisabled(!available);
+    if (ImGui::Button("Add copy to composition", {-1, 0})) {
+        try {
+            auto asset = import_asset_package(read_file(store->document(library_asset_key_)));
+            const auto original_name = asset.name;
+            unsigned suffix = 2;
+            while (std::any_of(document_->project_assets().begin(),
+                               document_->project_assets().end(), [&](auto &existing) {
+                                   return existing.name == asset.name;
+                               }))
+                asset.name = original_name.substr(0, 100) + " (" + std::to_string(suffix++) + ")";
+            asset.id = 0;
+            auto resource = document_->save_project_asset(std::move(asset));
+            sync_project_assets();
+            set_stage(AuthoringStage::Objects);
+            load_resource(resource);
+            error_.clear();
+            status_ = "Library asset added. This composition owns an independent copy; save the "
+                      "project to retain it.";
+        } catch (const std::exception &error) {
+            error_ = error.what();
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
 }
 void MapAuthoringWorkspace::browser() {
     if (focus_library_) {
@@ -1110,9 +1420,12 @@ void MapAuthoringWorkspace::browser() {
         ImGui::End();
         return;
     }
-    ImGui::SeparatorText("Project assets");
-    ImGui::TextDisabled("Saved with this composition");
-    ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
+    project_library();
+    ImGui::SeparatorText("Composition assets");
+    ImGui::TextDisabled("Drag an object onto the map to place it");
+    ImGui::BeginDisabled(((busy() || preview_) && !object_drag_resource_) || ground_handle_);
+    if (studio::TutorialWidgets::Button("map_authoring_workspace", "Import asset...", {-1, 0}))
+        object_exchange_dialog(false, false, true);
     if (document_->project_assets().empty())
         ImGui::TextWrapped("Choose a dump object or baked terrain below, then Extract asset.");
     for (const auto &asset : document_->project_assets()) {
@@ -1122,6 +1435,7 @@ void MapAuthoringWorkspace::browser() {
             set_stage(AuthoringStage::Objects);
             load_resource(key);
         }
+        object_drag_source(key, asset.name);
         ImGui::PopID();
     }
     ImGui::EndDisabled();
@@ -1132,7 +1446,7 @@ void MapAuthoringWorkspace::browser() {
             source_name = location.name + " (zone " + std::to_string(location.zone) + ")";
             break;
         }
-    ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
+    ImGui::BeginDisabled(((busy() || preview_) && !object_drag_resource_) || ground_handle_);
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##source-map", source_name.c_str())) {
         std::set<int> shown;
@@ -1187,7 +1501,7 @@ void MapAuthoringWorkspace::browser() {
         return x.vertices < y.vertices;
     });
     ImGui::TextDisabled("%zu resources | fewest vertices first", matches.size());
-    ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
+    ImGui::BeginDisabled(((busy() || preview_) && !object_drag_resource_) || ground_handle_);
     ImGui::BeginChild("Resource list", {0, 0}, ImGuiChildFlags_Borders);
     ImGuiListClipper clipper;
     clipper.Begin(int(matches.size()),
@@ -1208,10 +1522,11 @@ void MapAuthoringWorkspace::browser() {
                 set_stage(AuthoringStage::Objects);
                 load_resource(i);
             }
+            if (document_->can_place(i)) object_drag_source(i, entry.name);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip(
                     "%s", entry.reusable_static()
-                              ? "Click to inspect; return to Map to place on a tile."
+                              ? existing_mode_ ? "Click to inspect; return to Map to choose a surface point." : "Click to inspect; return to Map to place on a tile."
                           : entry.kind != MapResourceKind::StaticModel
                               ? "Inspect baked scenery, then Extract asset to trim and save a "
                                 "reusable object."
@@ -1229,6 +1544,7 @@ void MapAuthoringWorkspace::details() {
         ImGui::End();
         return;
     }
+    stage_toolbar();
     if (stage_ == AuthoringStage::Review) {
         ImGui::BeginDisabled(busy() || ground_handle_);
         review_tools();
@@ -1246,8 +1562,9 @@ void MapAuthoringWorkspace::details() {
         if (resource_ >= 0 && document_->project_asset(std::size_t(resource_))) {
             const auto *asset = document_->project_asset(std::size_t(resource_));
             ImGui::TextWrapped("Project asset: %s", asset->name.c_str());
-            ImGui::TextWrapped("Editing this asset updates its placed copies. Save as new asset "
-                               "creates an independent variant.");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Editing updates placed copies. Save as new asset creates an "
+                                  "independent variant.");
         }
         if (resource_ >= 0 && std::size_t(resource_) < document_->catalog().entries.size()) {
             const auto &entry = document_->catalog().entries.at(std::size_t(resource_));
@@ -1282,13 +1599,95 @@ void MapAuthoringWorkspace::details() {
                 ? "Edit project asset"
                 : "Extract asset",
             {-1, 0});
+        const bool import_new = studio::TutorialWidgets::Button(
+            "map_authoring_workspace", "Import new Blender model...", {-1, 0});
         ImGui::EndDisabled();
-        if (extract) {
+        ImGui::TextDisabled("New models use this resource’s game materials.");
+        if (resource_ >= 0 && document_->project_asset(std::size_t(resource_))) {
+            std::vector<std::string> models;
+            const auto &asset = *document_->project_asset(std::size_t(resource_));
+            if (!asset.native_resource.empty()) {
+                const auto pack =
+                    ModelPack::parse(Container::parse(asset.native_resource, "SM").files.at(1));
+                for (const auto &r : pack.resources)
+                    if (r.category == 0)
+                        models.push_back(r.name);
+            } else {
+                const auto &scene = resources_.at(std::size_t(resource_));
+                std::set<std::tuple<std::filesystem::path, std::size_t, std::vector<std::size_t>>>
+                    used;
+                for (const auto &draw : scene.draws)
+                    if (draw.source &&
+                        used.emplace(draw.source->archive, draw.source->member, draw.source->path)
+                            .second)
+                        models.push_back(draw.name);
+            }
+            studio_model_ = std::clamp(studio_model_, 0, std::max(0, int(models.size()) - 1));
+            ImGui::BeginDisabled(busy() || preview_ || ground_handle_ || !project_store());
+            if (models.size() > 1 &&
+                ImGui::BeginCombo("Studio model", models[studio_model_].c_str())) {
+                for (int i = 0; i < int(models.size()); ++i)
+                    if (ImGui::Selectable((models[i] + "##" + std::to_string(i)).c_str(),
+                                          studio_model_ == i))
+                        studio_model_ = i;
+                ImGui::EndCombo();
+            }
+            if (studio::TutorialWidgets::Button("map_authoring_workspace", "Edit in Studio",
+                                                {-1, 0}))
+                studio_request_ = std::size_t(resource_);
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(busy() || preview_ || ground_handle_);
+            ImGui::BeginDisabled(!project_store());
+            if (ImGui::Button("Publish to project library", {-1, 0})) {
+                try {
+                    publish_library_asset(false);
+                } catch (const std::exception &error) {
+                    error_ = error.what();
+                }
+            }
+            auto *store = project_store();
+            if (store && store->edits.contains(library_asset_key_) &&
+                store->edits.at(library_asset_key_).kind == "asset-library") {
+                ImGui::TextWrapped("Library destination: %s",
+                                   store->edits.at(library_asset_key_).label.c_str());
+                if (ImGui::Button("Replace selected library entry", {-1, 0})) {
+                    try {
+                        publish_library_asset(true);
+                    } catch (const std::exception &error) {
+                        error_ = error.what();
+                    }
+                }
+            }
+            ImGui::EndDisabled();
+            if (studio::TutorialWidgets::Button("map_authoring_workspace", "Export asset...",
+                                                {-1, 0})) {
+                capture_asset_studio();
+                package_export_ = *document_->project_asset(std::size_t(resource_));
+                object_exchange_dialog(true, false, true);
+            }
+            ImGui::EndDisabled();
+            if (!project_store())
+                ImGui::TextWrapped("Open a project to save Studio edits with this asset.");
+        }
+        if (extract || import_new) {
             begin_asset_edit();
+            if (import_new) {
+                asset_draft_.id = 0;
+                asset_draft_.name = "New Blender model";
+                refresh_asset_editor();
+                asset_history_ = {asset_draft_};
+                asset_history_cursor_ = 0;
+                object_exchange_dialog(false, true);
+            }
             ImGui::End();
             return;
         }
-        ImGui::SeparatorText("Tile placement");
+        ImGui::SeparatorText(existing_mode_ ? "Surface placement" : "Tile placement");
+        if (existing_mode_) {
+            if(surface_position_) ImGui::Text("Position: %.1f, %.1f, %.1f", (*surface_position_)[0], (*surface_position_)[1], (*surface_position_)[2]);
+            else ImGui::TextWrapped("Click a surface in Map view to choose the placement point.");
+        }
+        else
         if (tile_)
             ImGui::Text("Selected tile: %d, %d", tile_->x, tile_->z);
         else
@@ -1302,11 +1701,11 @@ void MapAuthoringWorkspace::details() {
         ImGui::InputFloat("##height-offset", &height_offset_, 1, 10);
         ImGui::TextWrapped("Ground is chosen below the search ceiling. Height offset lifts or "
                            "sinks the model's base.");
-        ImGui::BeginDisabled(preview_ || !tile_ || resource_ < 0 ||
+        ImGui::BeginDisabled(preview_ || (existing_mode_ ? !surface_position_ : !tile_) || resource_ < 0 ||
                              !resources_.contains(std::size_t(resource_)) ||
                              !document_->can_place(std::size_t(resource_)));
         if (studio::TutorialWidgets::Button("map_authoring_workspace",
-                                            "Preview on selected tile")) {
+                                            existing_mode_ ? "Preview at selected point" : "Preview on selected tile")) {
             try {
                 place_preview();
             } catch (const std::exception &error) {
@@ -1459,6 +1858,47 @@ std::string MapAuthoringWorkspace::report() const {
         out << composed_->report();
     return out.str();
 }
+ModelDocument MapAuthoringWorkspace::open_asset_studio(std::size_t resource) {
+    require(document_ && !busy() && !asset_edit_ && !preview_,
+            "Finish the Authoring operation first");
+    const auto *asset = document_->project_asset(resource);
+    require(asset != nullptr, "Select a saved project asset");
+    auto model =
+        project_asset_studio(dump_, document_->catalog(), *asset, std::size_t(studio_model_));
+    studio_resource_ = resource;
+    studio_baseline_ = *asset;
+    studio_document_.reset();
+    return model;
+}
+void MapAuthoringWorkspace::attach_asset_studio(std::shared_ptr<MaterialDocument> document,
+                                                std::function<bool()> ready) {
+    require(document && document->model.project_asset && studio_baseline_,
+            "No project asset Studio session");
+    studio_document_ = std::move(document);
+    studio_ready_ = std::move(ready);
+}
+void MapAuthoringWorkspace::capture_asset_studio() {
+    if (!studio_document_ || !studio_document_->dirty())
+        return;
+    require(!studio_ready_ || studio_ready_(),
+            "Finish the Studio operation before saving the project asset");
+    require(document_ && studio_baseline_, "Reopen the project asset before saving Studio edits");
+    const auto *current = document_->project_asset(studio_resource_);
+    require(
+        current && *current == *studio_baseline_,
+        "This project asset changed in Authoring. Reopen it in Studio before saving more edits");
+    studio_document_->commit();
+    auto candidate = save_project_asset_studio(*current, *studio_document_);
+    document_->save_project_asset(candidate);
+    studio_baseline_ = std::move(candidate);
+    sync_project_assets();
+    refresh_scene();
+}
+void MapAuthoringWorkspace::save_asset_studio() {
+    require(project_store() && studio_document_, "Open a project asset in Studio first");
+    save_editor_project();
+    status_ = "Studio edits saved to the project asset. All placed copies are updated.";
+}
 void MapAuthoringWorkspace::bind_project() {
     if (!document_)
         return;
@@ -1468,18 +1908,24 @@ void MapAuthoringWorkspace::bind_project() {
         (std::to_string(document_->catalog().area) + " \"" + project_baseline_ + "\" \"" +
          project_ground_base_ + "\""),
         [this] {
-            return document_ && document_->dirty();
+            return document_ &&
+                   (document_->dirty() || (studio_document_ && studio_document_->dirty()));
         },
         [this] {
             require(!busy() && !preview_ && !ground_handle_ && !asset_edit_,
                     "Finish the authoring gesture or asset edit before saving");
+            capture_asset_studio();
             return project_text(document_->serialize());
         },
         [this] {
             document_->mark_saved();
+            if (studio_document_)
+                studio_document_->mark_saved();
         });
     project_.autosave_when([this] {
-        return !busy() && !preview_ && !ground_handle_ && !asset_edit_;
+        return !busy() && !preview_ && !ground_handle_ && !asset_edit_ &&
+               (!studio_document_ || !studio_document_->dirty() || !studio_ready_ ||
+                studio_ready_());
     });
     project_.ready([this] {
         if (collision_editor_)

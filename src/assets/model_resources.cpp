@@ -119,6 +119,9 @@ Bytes assemble(const Model &model, const std::array<std::vector<std::string>, 4>
     return out;
 }
 }
+Bytes rebuild_model_metadata(const Model &model, const std::array<std::vector<std::string>, 4> &names) {
+    return metadata(model, names);
+}
 Bytes copy_model_material(View bytes, std::size_t index, const std::string &name) {
     valid_name(name);
     auto model = Model::parse(bytes);

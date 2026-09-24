@@ -66,6 +66,12 @@ void ImGuiRenderer::upload_font() {
 }
 ImGuiRenderer::~ImGuiRenderer() {
     ImGui::GetIO().Fonts->SetTexID(0);
+    for (const auto &buffers : overflow_) {
+        if (bgfx::isValid(buffers.vertices))
+            bgfx::destroy(buffers.vertices);
+        if (bgfx::isValid(buffers.indices))
+            bgfx::destroy(buffers.indices);
+    }
     bgfx::destroy(font_);
     bgfx::destroy(program_);
     bgfx::destroy(sampler_);
@@ -86,17 +92,38 @@ void ImGuiRenderer::render(ImDrawData *data) {
     bgfx::setViewMode(view, bgfx::ViewMode::Sequential);
     bgfx::setViewClear(view, BGFX_CLEAR_COLOR, 0x111820ff);
     bgfx::touch(view);
+    std::size_t list_index = 0;
     for (auto list : data->CmdLists) {
         bgfx::TransientVertexBuffer vb;
         bgfx::TransientIndexBuffer ib;
         auto nv = std::uint32_t(list->VtxBuffer.Size), ni = std::uint32_t(list->IdxBuffer.Size);
-        if (bgfx::getAvailTransientVertexBuffer(nv, layout_) != nv ||
-            bgfx::getAvailTransientIndexBuffer(ni) != ni)
-            throw std::runtime_error("UI transient buffer capacity exceeded");
-        bgfx::allocTransientVertexBuffer(&vb, nv, layout_);
-        bgfx::allocTransientIndexBuffer(&ib, ni);
-        std::memcpy(vb.data, list->VtxBuffer.Data, nv * sizeof(ImDrawVert));
-        std::memcpy(ib.data, list->IdxBuffer.Data, ni * sizeof(ImDrawIdx));
+        constexpr bool index32 = sizeof(ImDrawIdx) == 4;
+        bool transient = bgfx::getAvailTransientVertexBuffer(nv, layout_) == nv &&
+                         bgfx::getAvailTransientIndexBuffer(ni, index32) == ni;
+        OverflowBuffers *buffers = nullptr;
+        if (transient) {
+            bgfx::allocTransientVertexBuffer(&vb, nv, layout_);
+            bgfx::allocTransientIndexBuffer(&ib, ni, index32);
+            std::memcpy(vb.data, list->VtxBuffer.Data, nv * sizeof(ImDrawVert));
+            std::memcpy(ib.data, list->IdxBuffer.Data, ni * sizeof(ImDrawIdx));
+        } else {
+            if (overflow_.size() <= list_index)
+                overflow_.resize(list_index + 1);
+            buffers = &overflow_[list_index];
+            if (!bgfx::isValid(buffers->vertices))
+                buffers->vertices =
+                    bgfx::createDynamicVertexBuffer(nv, layout_, BGFX_BUFFER_ALLOW_RESIZE);
+            if (!bgfx::isValid(buffers->indices))
+                buffers->indices = bgfx::createDynamicIndexBuffer(
+                    ni, BGFX_BUFFER_ALLOW_RESIZE | (index32 ? BGFX_BUFFER_INDEX32 : 0));
+            require(bgfx::isValid(buffers->vertices) && bgfx::isValid(buffers->indices),
+                    "Cannot allocate UI drawing buffers");
+            bgfx::update(buffers->vertices, 0,
+                         bgfx::copy(list->VtxBuffer.Data, nv * sizeof(ImDrawVert)));
+            bgfx::update(buffers->indices, 0,
+                         bgfx::copy(list->IdxBuffer.Data, ni * sizeof(ImDrawIdx)));
+        }
+        ++list_index;
         for (auto &cmd : list->CmdBuffer) {
             if (cmd.UserCallback) {
                 if (cmd.UserCallback != ImDrawCallback_ResetRenderState)
@@ -127,8 +154,13 @@ void ImGuiRenderer::render(ImDrawData *data) {
                     ? BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT | BGFX_SAMPLER_MIP_POINT |
                           BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP
                     : UINT32_MAX);
-            bgfx::setVertexBuffer(0, &vb, cmd.VtxOffset, nv - cmd.VtxOffset);
-            bgfx::setIndexBuffer(&ib, cmd.IdxOffset, cmd.ElemCount);
+            if (transient) {
+                bgfx::setVertexBuffer(0, &vb, cmd.VtxOffset, nv - cmd.VtxOffset);
+                bgfx::setIndexBuffer(&ib, cmd.IdxOffset, cmd.ElemCount);
+            } else {
+                bgfx::setVertexBuffer(0, buffers->vertices, cmd.VtxOffset, nv - cmd.VtxOffset);
+                bgfx::setIndexBuffer(buffers->indices, cmd.IdxOffset, cmd.ElemCount);
+            }
             bgfx::submit(view, program_);
         }
     }
