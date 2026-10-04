@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # See LICENSE in this directory.
 
-bl_info = {"name": "USUMStudio asset exchange", "author": "USUM Studio", "version": (1, 5, 0), "blender": (4, 2, 0), "location": "File > Import/Export", "category": "Import-Export"}
+bl_info = {"name": "USUMStudio asset exchange", "author": "USUM Studio", "version": (1, 5, 1), "blender": (4, 2, 0), "location": "File > Import/Export", "category": "Import-Export"}
 
 import base64
 import hashlib
@@ -226,7 +226,7 @@ def preview_material(path, data, preview):
     material = bpy.data.materials.new(data["name"] + " preview")
     material.use_nodes = True
     nodes, links = material.node_tree.nodes, material.node_tree.links
-    shader = nodes.get("Principled BSDF")
+    shader = next(node for node in nodes if node.type == 'BSDF_PRINCIPLED')
     shader.inputs["Roughness"].default_value = 1
     texture = Path(path).parent / data["texture"]
     if not data["texture"] or not texture.is_file():

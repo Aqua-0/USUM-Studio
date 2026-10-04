@@ -1,4 +1,5 @@
 #pragma once
+#include "native/studio_resource_browser.h"
 #include "assets/asset_package.h"
 #include "native/uv_motion_editor.h"
 #include "assets/model_document.h"
@@ -15,11 +16,13 @@
 #include "native/model_exchange_editor.h"
 #include "native/pokemon_bundle_editor.h"
 #include "native/character_registration_editor.h"
+#include "native/battle_model_addition_editor.h"
 #include "native/visibility_motion_editor.h"
 #include "native/geometry_editor.h"
 #include "native/refresh_inspector.h"
 #include "native/camera.h"
 #include "native/pokemon_settings_editor.h"
+#include "native/pokemon_effect_point_editor.h"
 #include "native/folder_picker.h"
 #include <future>
 #include <utility>
@@ -133,6 +136,8 @@ class ModelWorkspace {
     void fit(int draw = -1);
     void poll();
     void details();
+    StudioResourceBrowser resource_browser_;
+    void navigate_resource(const StudioResourceRequest &request);
     std::optional<ModelExchange> new_object_geometry_;
     std::unique_ptr<ModelDocument> new_object_template_;
     std::vector<std::size_t> new_object_materials_;
@@ -149,6 +154,9 @@ class ModelWorkspace {
     MaterialMotionEditor motion_editor_;
     UvMotionEditor uv_motion_editor_;
     PokemonSettingsEditor settings_editor_;
+    PokemonEffectPointEditor effect_point_editor_;
+    PokemonEffectPointEditor decoration_point_editor_{true};
+    PokemonPreviewSettings preview_settings_;
     bool pending_battle_ = false;
     std::filesystem::path pending_settings_;
     SkeletalMotionEditor skeletal_motion_editor_;
@@ -157,6 +165,7 @@ class ModelWorkspace {
     ModelExchangeEditor model_exchange_editor_;
     PokemonBundleEditor bundle_editor_;
     CharacterRegistrationEditor character_registration_;
+    BattleModelAdditionEditor battle_model_addition_;
     bool character_stage_requested_ = false;
     VisibilityMotionEditor visibility_motion_editor_;
     GeometryEditor geometry_editor_;

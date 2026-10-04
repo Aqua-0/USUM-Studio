@@ -185,6 +185,8 @@ void ModelWorkspace::poll() {
                 pending_settings_.clear();
             }
             refresh_inspector_.reset();
+            effect_point_editor_.reset();
+            decoration_point_editor_.reset();
             renderer_.set_scene(document_->scene);
             renderer_.weather_effect = document_->scene->weather_particles.empty() ? 0 : 1;
             renderer_.playback.seconds = 0;
@@ -208,6 +210,8 @@ void ModelWorkspace::poll() {
 }
 void ModelWorkspace::open_document(ModelDocument document) {
     refresh_inspector_.reset();
+    effect_point_editor_.reset();
+    decoration_point_editor_.reset();
     editor_->open(std::move(document));
     document_ = std::make_unique<ModelDocument>(editor_->document()->model);
     settings_editor_.bind(*document_);
@@ -456,6 +460,7 @@ void ModelWorkspace::browse(const char *dump, const ArchiveSources &archives) {
     if (matches.empty() && !busy)
         ImGui::TextWrapped("%s",
                            count ? "No matching models."
+                           : !error_.empty() ? error_.c_str()
                                  : "No models found for this category. Check the source archive.");
     ImGuiListClipper clipper;
     clipper.Begin(int(matches.size()));
@@ -485,7 +490,12 @@ void ModelWorkspace::draw(std::uint32_t frame, const char *dump, const ArchiveSo
         asset_actions(std::filesystem::u8path(dump));
         if (editor_->document() && document_)
             editor_->document()->model.looping_effects = document_->looping_effects;
+        int previous_material = selection_.material;
         editor_->draw(renderer_, selection_, std::filesystem::u8path(dump));
+        if (selection_.material != previous_material)
+            resource_browser_.follow(StudioResourceKind::Material, selection_.material);
+        if (int request = editor_->take_resource_request())
+            resource_browser_.open(request == 2);
         if (editor_->take_uv_request())
             inspector_page_ = "UVs";
         if (editor_->document() && document_ &&
@@ -518,7 +528,15 @@ void ModelWorkspace::draw(std::uint32_t frame, const char *dump, const ArchiveSo
             document_->refresh_feeding = editor_->document()->model.refresh_feeding;
         }
     }
+    int inspector_bone = bone_;
     details();
+    if (studio_ && inspector_bone != bone_)
+        resource_browser_.follow(StudioResourceKind::Bone, bone_, 0);
+    if (studio_ && document_ && editor_->document())
+        if (auto request =
+                resource_browser_.draw(*editor_->document(), renderer_, editor_->workflow_status(),
+                                       editor_->editing_available()))
+            navigate_resource(*request);
     if (!studio_)
         selection_.focus = false;
     if (studio_ && (!geometry_tab_ || !editor_->editing_available()) && document_)
@@ -533,7 +551,10 @@ void ModelWorkspace::draw(std::uint32_t frame, const char *dump, const ArchiveSo
         if (auto keyed = uv_motion_editor_.take_keyed())
             motion_editor_.focus_uv(keyed->first, keyed->second);
     }
+    int previous_bone = bone_;
     viewport(frame);
+    if (studio_ && bone_ != previous_bone)
+        resource_browser_.follow(StudioResourceKind::Bone, bone_, 0);
     if (studio_ && inspector_page_ == "UVs")
         editor_->uvs(renderer_, selection_);
     if (inspector_page_ == "Source") {
@@ -649,6 +670,13 @@ void ModelWorkspace::details() {
     auto &scene = *document_->scene;
     ImGui::TextWrapped("%s", document_->name.c_str());
     ImGui::Text("%zu mesh parts | %zu materials", scene.draws.size(), scene.materials.size());
+    if (studio_ && editor_->document()) {
+        if (TutorialWidgets::Button("studio_resources", "Resources..."))
+            resource_browser_.open();
+        ImGui::SameLine();
+        if (TutorialWidgets::Button("studio_resources", "Changes..."))
+            resource_browser_.open(true);
+    }
     if (document_->is_pokemon() && document_->independent_asset.empty()) {
         int part = document_->shadow_model ? 1 : 0;
         ImGui::BeginDisabled(job_.valid() || (studio_ && !editor_->editing_available()));
@@ -679,6 +707,8 @@ void ModelWorkspace::details() {
                         document_ = std::make_unique<ModelDocument>(std::move(next));
                         settings_editor_.bind(*document_);
                         refresh_inspector_.reset();
+                        effect_point_editor_.reset();
+                        decoration_point_editor_.reset();
                         renderer_.set_scene(document_->scene);
                         selection_ = {};
                         bone_ = -1;
@@ -699,6 +729,10 @@ void ModelWorkspace::details() {
         if (CharacterRegistrationEditor::accepts(*document_) &&
             ImGui::Button("Register new character...", {-1, 0}))
             inspector_page_ = "Register character";
+        if (BattleModelAdditionEditor::accepts(*document_) &&
+            ImGui::Button(model_category_matches(ModelCategory::PokeBalls, document_->name)
+                              ? "Add Poke Ball model..." : "Add battle character...", {-1, 0}))
+            inspector_page_ = "Add model";
         if (ImGui::Button("More actions", {-1, 0}))
             ImGui::OpenPopup("Model actions");
         ImGui::SetNextWindowSize({320, 0});
@@ -746,6 +780,8 @@ void ModelWorkspace::details() {
                 return studio_;
             if (page == "Overworld character")
                 return studio_ && can_convert_overworld_character(*document_);
+            if (page == "Add model")
+                return !studio_ && BattleModelAdditionEditor::accepts(*document_);
             if (page == "Register character")
                 return !studio_ && CharacterRegistrationEditor::accepts(*document_);
             if (page == "Settings")
@@ -753,7 +789,7 @@ void ModelWorkspace::details() {
             if (page == "Cries")
                 return document_->independent_asset.empty() && cry_editor_ && !document_->shadow_model && document_->area < 0 &&
                        document_->pokemon.species;
-            if (page == "Refresh")
+            if (page == "Refresh" || page == "Effect points" || page == "Decoration points")
                 return document_->independent_asset.empty() && document_->is_pokemon() && !document_->shadow_model;
             if (page == "Geometry")
                 return studio_ && editor_->document() &&
@@ -770,11 +806,21 @@ void ModelWorkspace::details() {
         if (ImGui::BeginCombo("##inspector-page", inspector_page_.c_str())) {
             for (const char *page :
                  {"Meshes", "Materials", "Geometry", "UVs", "Skeleton", "Motions", "Blender",
-                  "Lighting", "Settings", "Overworld character", "Register character", "Cries", "Refresh", "Source"}) {
+                  "Lighting", "Settings", "Overworld character", "Register character", "Add model", "Cries", "Refresh", "Effect points", "Decoration points", "Source"}) {
                 if (!available_page(page))
                     continue;
-                if (ImGui::Selectable(page, inspector_page_ == page))
+                if (ImGui::Selectable(page, inspector_page_ == page)) {
+                    effect_point_editor_.cancel_drag();
+                    decoration_point_editor_.cancel_drag();
                     inspector_page_ = page;
+                    if (inspector_page_ == "Effect points" || inspector_page_ == "Decoration points") {
+                        if (studio_ && editor_->document())
+                            editor_->document()->commit();
+                        settings_editor_.active = false;
+                        refresh_inspector_.reset();
+                        renderer_.refresh.enabled = false;
+                    }
+                }
             }
             ImGui::EndCombo();
         }
@@ -789,6 +835,11 @@ void ModelWorkspace::details() {
                 renderer_.playback.seconds = 0;
                 motion_group_ = int(document_->motions.at(document_->motion).group);
             }
+        }
+        if (!studio_ && inspector_page_ == "Add model") {
+            character_stage_requested_ |= battle_model_addition_.draw(*document_);
+            if (auto created = battle_model_addition_.take_created())
+                studio_request_ = std::move(created);
         }
         if (!studio_ && inspector_page_ == "Register character") {
             character_stage_requested_ |= character_registration_.draw(*document_);
@@ -848,6 +899,8 @@ void ModelWorkspace::details() {
                 if (ImGui::Selectable((d.mesh + " / " + std::to_string(i)).c_str(),
                                       selection_.mesh_selected(int(i)))) {
                     selection_.select_mesh(int(i), int(d.material), ImGui::GetIO().KeyCtrl);
+                    if (studio_)
+                        resource_browser_.follow(StudioResourceKind::Mesh, int(i));
                     if (selection_.draw >= 0)
                         selection_.material = int(scene.draws[selection_.draw].material);
                 }
@@ -951,6 +1004,20 @@ void ModelWorkspace::details() {
                                         window_);
             ImGui::EndDisabled();
         }
+        if (document_->is_pokemon() && !document_->shadow_model && begin_page("Decoration points")) {
+            ImGui::BeginDisabled(studio_ && !editor_->editing_available());
+            ImGui::BeginDisabled(decoration_point_editor_.dragging());
+            decoration_point_editor_.draw(*document_, studio_ ? editor_->document() : nullptr);
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+        }
+        if (document_->is_pokemon() && !document_->shadow_model && begin_page("Effect points")) {
+            ImGui::BeginDisabled(studio_ && !editor_->editing_available());
+            ImGui::BeginDisabled(effect_point_editor_.dragging());
+            effect_point_editor_.draw(*document_, studio_ ? editor_->document() : nullptr);
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+        }
         if (document_->is_pokemon() && !document_->shadow_model && begin_page("Refresh")) {
             refresh_inspector_.draw(*document_, renderer_, selection_,
                                     studio_ && editor_->editing_available() ? editor_->document()
@@ -976,7 +1043,7 @@ void ModelWorkspace::details() {
             }
             if (document_->area < 0 && !document_->clothing && motion_kind_ == 1)
                 skeletal_motion_editor_.draw(*editor_->document(), *document_, renderer_, playing_,
-                                             repeat_, bone_, show_bones_);
+                                             repeat_, bone_, show_bones_, &show_weights_);
             else if (document_->area < 0 && !document_->clothing && motion_kind_ == 2)
                 visibility_motion_editor_.draw(*editor_->document(), *document_, renderer_,
                                                playing_, repeat_);
@@ -1235,6 +1302,8 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
                                pick_additive_);
         if (selection_.draw >= 0)
             selection_.material = int(document_->scene->draws[selection_.draw].material);
+        if (studio_ && *picked >= 0)
+            resource_browser_.follow(StudioResourceKind::Mesh, *picked);
         selection_.focus = *picked >= 0 && !renderer_.refresh.active();
         if (renderer_.refresh.active()) {
             renderer_.refresh.selected = -1;
@@ -1248,6 +1317,9 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
             }
         }
     }
+    const bool pokemon_preview_available = document_->is_pokemon() && !document_->shadow_model;
+    renderer_.pokemon_preview = pokemon_preview_available ? preview_settings_ : PokemonPreviewSettings{};
+    settings_editor_.preview_settings = renderer_.pokemon_preview;
     if (settings_editor_.active && settings_editor_.sendout_active()) {
         settings_editor_.viewport(*document_, renderer_.playback.seconds);
         ImGui::End();
@@ -1257,11 +1329,72 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
         if (ImGui::Button("Frame"))
             fit(selection_.draw);
         ImGui::SameLine();
+        if (pokemon_preview_available) {
+            ImGui::SetNextItemWidth(120);
+            int profile = int(preview_settings_.profile);
+            if (ImGui::Combo("##pokemon-preview-profile", &profile, "Studio\0Summary\0Battle\0")) {
+                preview_settings_.profile = PokemonPreviewProfile(profile);
+                renderer_.pokemon_preview = preview_settings_;
+                settings_editor_.preview_settings = preview_settings_;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Preview details")) ImGui::OpenPopup("Pokemon preview details");
+            ImGui::SetNextWindowSizeConstraints({480, 0}, {580, 700});
+            if (ImGui::BeginPopup("Pokemon preview details")) {
+                ImGui::TextUnformatted("Preview only; authored materials are unchanged.");
+                if (preview_settings_.shared_outline_depth())
+                    ImGui::TextWrapped("Outline depth is drawn before the model. Materials can hide themselves or surfaces behind them. The Outlines display toggle only hides the outline strokes.");
+                if (preview_settings_.battle()) {
+                    int environment = int(preview_settings_.environment);
+                    if (ImGui::Combo("Environment", &environment, "Day\0Evening\0Night / cave\0"))
+                        preview_settings_.environment = unsigned(environment);
+                    int slot = int(preview_settings_.stencil_offset);
+                    if (ImGui::SliderInt("Battle slot", &slot, 0, 5)) preview_settings_.stencil_offset = unsigned(slot);
+                    ImGui::Text("Constant 5: RGB %.2f, alpha 1.00", preview_settings_.brightness());
+                    ImGui::TextUnformatted("Uses the material's first depth command, as the runtime cache does.");
+                } else {
+                    ImGui::TextUnformatted("Authored material state. Scene lighting remains controlled by Lighting.");
+                }
+                if (ImGui::Button("Player-side camera")) { camera_.yaw = 3.54f; camera_.pitch = .2f; }
+                ImGui::SameLine();
+                if (ImGui::Button("Opponent-side camera")) { camera_.yaw = .4f; camera_.pitch = .2f; }
+                ImGui::Separator();
+                bool conflict = false;
+                for (const auto &m : document_->scene->materials) {
+                    if (m.runtime_depth_state && *m.runtime_depth_state != m.depth_state) {
+                        conflict = true;
+                        ImGui::TextWrapped("%s: conflicting depth commands (authored %04X, runtime %04X)",
+                            m.name.c_str(), unsigned(m.depth_state), unsigned(*m.runtime_depth_state));
+                    }
+                    for (unsigned stage = 0; stage < 6; ++stage)
+                        if (m.constant_assignments[stage] == 5 &&
+                            (std::find(m.combiner.stages[stage].color_sources.begin(), m.combiner.stages[stage].color_sources.end(), 14.f) != m.combiner.stages[stage].color_sources.end() ||
+                             std::find(m.combiner.stages[stage].alpha_sources.begin(), m.combiner.stages[stage].alpha_sources.end(), 14.f) != m.combiner.stages[stage].alpha_sources.end())) {
+                            ImGui::TextWrapped("%s / stage %u: Constant 5 alpha %.2f -> battle 1.00",
+                                m.name.c_str(), stage + 1, m.combiner.stages[stage].constant[3]);
+                            break;
+                        }
+                }
+                if (conflict && studio_ && editor_->document() && ImGui::Button("Repair exported depth state"))
+                    try {
+                        editor_->document()->repair_runtime_depth();
+                        *document_ = editor_->document()->preview_model();
+                        renderer_.set_scene(document_->scene);
+                        status_ = "Depth commands repaired. Save and stage to export.";
+                    } catch (const std::exception &e) { error_ = e.what(); }
+                ImGui::Separator();
+                ImGui::TextWrapped("Motion and material-loop selection stay in Animation. Battle color effects, key-event loop gating and exact game lighting are not simulated yet.");
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+        }
         if (ImGui::Button("Animation"))
             animation_controls_open_ = !animation_controls_open_;
         ImGui::SameLine();
-        if (ImGui::Button("Display"))
+        if (ImGui::Button(renderer_.shading_view == ShadingView::Shaded ? "Display" : "Display *"))
             ImGui::OpenPopup("Model display");
+        if (renderer_.shading_view != ShadingView::Shaded && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Shading inspection is active. Open Display to change views or return to shaded.");
         ImGui::SameLine();
         if (ImGui::Button("Controls"))
             ImGui::OpenPopup("Model navigation");
@@ -1287,6 +1420,8 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
                         "Actual game arena and trainer; edit Pokemon settings in the Settings tab");
             }
             auto select_motion = [&](int index) {
+                if (studio_ && index >= 0 && index != document_->motion)
+                    resource_browser_.follow(StudioResourceKind::Motion, index);
                 document_->select_motion(index, repeat_);
                 renderer_.refresh_materials();
             };
@@ -1426,17 +1561,51 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
         ImGui::End();
         return;
     }
-    ImGui::SetNextWindowSize({380, 0}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({380, 0});
     if (ImGui::BeginPopup("Model display")) {
+        ImGui::SeparatorText("Shading inspection");
+        static const char *views[] = {"Shaded", "Material color", "Material alpha", "Texture channels",
+            "Vertex color", "Vertex alpha", "Normals (world)", "Mapped normals (world)",
+            "Tangents (world)", "UV coordinates", "Diffuse lighting", "Specular lighting"};
+        ImGui::BeginDisabled(renderer_.refresh.active());
+        int shading = int(renderer_.shading_view);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("##Shading view", &shading, views, IM_ARRAYSIZE(views)))
+            renderer_.shading_view = ShadingView(shading);
+        TutorialWidgets::item("shading_inspection", views[shading], ImGui::IsItemEdited());
+        if (renderer_.shading_view == ShadingView::Texture) {
+            ImGui::Combo("Texture slot", &renderer_.inspection_texture, "0\0" "1\0" "2\0");
+            TutorialWidgets::item("shading_inspection", "Texture slot", ImGui::IsItemEdited());
+            ImGui::Combo("Channel", &renderer_.inspection_channel, "RGB\0Red\0Green\0Blue\0Alpha\0");
+            TutorialWidgets::item("shading_inspection", "Channel", ImGui::IsItemEdited());
+            ImGui::TextWrapped("Samples the material's transformed texture coordinates. Unbound slots use white.");
+        }
+        if (renderer_.shading_view == ShadingView::UVs) {
+            ImGui::Combo("UV set", &renderer_.inspection_uv, "0\0" "1\0" "2\0");
+            TutorialWidgets::item("shading_inspection", "UV set", ImGui::IsItemEdited());
+            ImGui::TextWrapped("Red = U, green = V; blue checker shows stretching and repeats.");
+        }
+        if (renderer_.shading_view != ShadingView::Shaded) {
+            TutorialWidgets::Checkbox("shading_inspection", "Apply material alpha test", &renderer_.inspection_alpha_test);
+            ImGui::TextWrapped("Preview only. Alpha: black = 0, white = 1. Direction colors: RGB = XYZ. Blending, fog and outlines are hidden; material culling is retained.");
+            if (renderer_.shading_view == ShadingView::MappedNormals)
+                ImGui::TextWrapped("Uses the material's normal-map configuration and the Normal maps preview setting.");
+            if (renderer_.shading_view == ShadingView::DiffuseLighting ||
+                renderer_.shading_view == ShadingView::SpecularLighting)
+                ImGui::TextWrapped("Uses the current lighting preview. Diffuse includes ambient and emission; specular includes the material's lighting tables.");
+            if (TutorialWidgets::Button("shading_inspection", "Return to shaded")) renderer_.shading_view = ShadingView::Shaded;
+        }
+        ImGui::EndDisabled();
+        ImGui::Separator();
         ImGui::Checkbox("PICA float24 UV precision", &renderer_.pica_texture_precision);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Round texture coordinates to 16 fraction bits before sampling. "
                               "Experimental approximation; preview only.");
-        ImGui::BeginDisabled(renderer_.refresh.active());
+        ImGui::BeginDisabled(renderer_.refresh.active() || renderer_.shading_view != ShadingView::Shaded);
         studio::TutorialWidgets::Checkbox("model_workspace", "Outlines", &renderer_.outlines);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
-                "Game-style material outlines. Preview only; does not change exported assets.");
+                "Show outline strokes. Summary and Battle still run the shared depth pass when strokes are hidden.");
         ImGui::SameLine();
         studio::TutorialWidgets::Checkbox("model_workspace", "Wireframe", &renderer_.wireframe);
         if (ImGui::IsItemHovered())
@@ -1517,10 +1686,23 @@ void ModelWorkspace::viewport(std::uint32_t frame) {
         geometry_tab_ && editor_->editing_available() &&
         geometry_editor_.viewport(*editor_->document(), *document_, renderer_, camera_, view,
                                   projection, origin, size, hovered);
-    if (bone_captured || geometry_captured) studio::UndoShortcuts::block("material_editor");
+    bool effect_point_captured = inspector_page_ == "Effect points" &&
+        effect_point_editor_.viewport(*document_, renderer_.playback.seconds,
+                                     renderer_.playback.enabled && renderer_.playback.skeletal,
+                                     view, projection, origin, size, hovered,
+                                     studio_ && editor_->editing_available() ? editor_->document() : nullptr,
+                                     &playing_);
+    bool decoration_point_captured = inspector_page_ == "Decoration points" &&
+        decoration_point_editor_.viewport(*document_, renderer_.playback.seconds,
+                                     renderer_.playback.enabled && renderer_.playback.skeletal,
+                                     view, projection, origin, size, hovered,
+                                     studio_ && editor_->editing_available() ? editor_->document() : nullptr,
+                                     &playing_);
+    if (bone_captured || geometry_captured || effect_point_captured || decoration_point_captured)
+        studio::UndoShortcuts::block("material_editor");
     if (hovered && (!bone_captured || viewport_navigating()) &&
         (!geometry_captured || viewport_navigating()) && !io.WantTextInput) {
-        if (!viewport_navigating() && (!refresh_inspector_.painting() || io.KeyCtrl) &&
+        if (!effect_point_captured && !decoration_point_captured && !viewport_navigating() && (!refresh_inspector_.painting() || io.KeyCtrl) &&
             ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
             io.MouseDragMaxDistanceSqr[0] < io.MouseDragThreshold * io.MouseDragThreshold) {
             pick_additive_ = io.KeyCtrl;

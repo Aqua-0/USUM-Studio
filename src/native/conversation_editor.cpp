@@ -1,5 +1,6 @@
 #include "native/tutorial_widgets.h"
 #include "native/conversation_editor.h"
+#include "field/interaction_templates.h"
 #include "native/undo_shortcuts.h"
 #include "field/dialogue_text.h"
 #include <SDL3/SDL.h>
@@ -51,7 +52,23 @@ const char *name(ConversationAction action) {
                                   "If battle result",
                                   "Start trainer battle",
                                   "Ask multiple choice",
-                                  "Option"};
+                                  "Option",
+                                  "Give Pokemon",
+                                  "Trade Pokemon",
+                                  "Trade items",
+                                  "If player has Pokemon",
+                                  "If player has item",
+                                  "If money",
+                                  "Give money",
+                                  "Take money",
+                                  "Take item",
+                                  "Heal party",
+                                  "Warp player",
+                                  "Show character",
+                                  "Hide character",
+                                  "Add to work value",
+                                  "Subtract from work value",
+                                  "Buy item"};
     return names[int(action)];
 }
 std::string target_name(const ConversationActor &target) {
@@ -67,8 +84,18 @@ const char *branch_name(ConversationAction action, bool other) {
         return other ? "Cancel" : "Options";
     if (action == ConversationAction::Choice)
         return other ? "No / Cancel" : "Yes";
-    if (action == ConversationAction::GiveItem)
+    if (action == ConversationAction::GiveItem || action == ConversationAction::GivePokemon)
         return other ? "Not given" : "Given";
+    if (action == ConversationAction::TradePokemon || action == ConversationAction::TradeItems)
+        return other ? "Not traded / cancelled" : "Traded";
+    if (action == ConversationAction::GiveMoney)
+        return other ? "Wallet cannot hold full amount" : "Given";
+    if (action == ConversationAction::TakeMoney)
+        return other ? "Not enough money" : "Paid";
+    if (action == ConversationAction::BuyItem)
+        return other ? "Not purchased" : "Purchased";
+    if (action == ConversationAction::TakeItem)
+        return other ? "Not taken" : "Taken";
     if (action == ConversationAction::TrainerBattle)
         return other ? "Defeated / before recovery" : "Won";
     if (action == ConversationAction::Encounter)
@@ -235,6 +262,7 @@ void ConversationEditor::compiler_settings(Preferences &preferences) {
 void ConversationEditor::compile_all(Preferences &preferences) {
     if (!project_store() || compilation_.valid())
         return;
+    compilation_result_.reset();
     compiler_settings(preferences);
     compile_status_open_ = true;
     error_.clear();
@@ -293,9 +321,11 @@ void ConversationEditor::compile_all(Preferences &preferences) {
         output_ = "Compiling...";
     } catch (const std::exception &e) {
         error_ = e.what();
+        compilation_result_ = error_;
     }
 }
 void ConversationEditor::global_controls(Preferences &preferences) {
+    scene_tools_.record_editor(record_editor_);
     auto *store = project_store();
     auto root = store ? store->root : std::filesystem::path{};
     auto source = store ? store->source : std::filesystem::path{};
@@ -306,6 +336,7 @@ void ConversationEditor::global_controls(Preferences &preferences) {
         output_.clear();
         error_.clear();
         sound_picker_.reset();
+        record_editor_.reset();
         scene_tools_.reset();
         binding_.unbind();
         workspace_.reset();
@@ -320,11 +351,13 @@ void ConversationEditor::global_controls(Preferences &preferences) {
         compilation_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         try {
             auto result = compilation_.get();
+            compilation_result_ = "Conversation compilation was interrupted; try building again";
             if (!discard_compilation_) {
                 diagnostics_ = std::move(result.diagnostics);
                 diagnostic_actor_ = result.actor;
                 output_ = std::move(result.output);
                 error_ = std::move(result.error);
+                if (!error_.empty()) compilation_result_ = error_;
                 if (error_.empty() && result.succeeded) {
                     auto *store = project_store();
                     for (const auto &[edit, record] : result.other_areas) {
@@ -336,6 +369,7 @@ void ConversationEditor::global_controls(Preferences &preferences) {
                         store->capture(edit, project_text(record));
                     if (result.workspace)
                         workspace_ = std::move(result.workspace);
+                    compilation_result_ = std::string{};
                     output_ =
                         "All conversations compiled and link-checked. Save and Stage Project to "
                         "apply them.";
@@ -343,8 +377,11 @@ void ConversationEditor::global_controls(Preferences &preferences) {
             }
         } catch (const std::exception &e) {
             error_ = e.what();
+            compilation_result_ = error_;
         }
     }
+
+    if (record_editor_.draw()) scene_tools_.refresh_records();
 
     compilation_guard_.ready([this] {
         require(!compilation_.valid(), "Wait for conversation compilation to finish");
@@ -526,6 +563,7 @@ void ConversationEditor::visual() {
         if (found.siblings) {
             auto &s = found.siblings->at(found.index);
             ImGui::SeparatorText(name(s.action));
+            TutorialWidgets::item("conversation_editor", name(s.action));
             auto message = [&](const char *label, const std::string &symbol, bool rich = false) {
                 auto m =
                     std::find_if(draft.messages.begin(), draft.messages.end(), [&](const auto &v) {
@@ -659,8 +697,56 @@ void ConversationEditor::visual() {
                         "Waits until the actor finishes. A blocked actor can keep the interaction "
                         "waiting. Use clear intermediate destinations to route around obstacles.");
             }
-            if (s.action == ConversationAction::GiveItem)
+            if (s.action == ConversationAction::HealParty)
+                ImGui::TextWrapped("Restores the party's HP, PP and status. No healing animation is played.");
+            if (s.action == ConversationAction::ShowActor || s.action == ConversationAction::HideActor) {
+                changed |= scene_tools_.actor(s);
+                ImGui::TextWrapped("Changes the loaded character's visibility. Collision and interactions remain active. "
+                                   "Use a placement condition and a saved flag for a permanent disappearance.");
+            }
+            if (s.action == ConversationAction::WarpPlayer)
+                changed |= scene_tools_.warp(s);
+            if (s.action == ConversationAction::AddWork || s.action == ConversationAction::SubtractWork) {
+                changed |= ImGui::InputInt("Work ID", &s.state_id, 1, 100, ImGuiInputTextFlags_EnterReturnsTrue);
+                if (ImGui::InputInt("Amount", &s.value)) {
+                    s.value = std::clamp(s.value, 0, 65535);
+                    changed = true;
+                }
+                ImGui::TextWrapped("Updates a counter, clamped from 0 to 65535. Uses existing game work IDs; "
+                                   "no unused ID is inferred.");
+            }
+            if (s.action == ConversationAction::GivePokemon || s.action == ConversationAction::TradePokemon)
+                changed |= scene_tools_.pokemon_reward(s);
+            if (s.action == ConversationAction::GiveItem || s.action == ConversationAction::TradeItems ||
+                s.action == ConversationAction::IfItem || s.action == ConversationAction::TakeItem ||
+                s.action == ConversationAction::BuyItem)
                 changed |= scene_tools_.reward(s);
+            if (s.action == ConversationAction::IfPokemon)
+                changed |= scene_tools_.pokemon_condition(s);
+            if (s.action == ConversationAction::IfMoney || s.action == ConversationAction::GiveMoney ||
+                s.action == ConversationAction::TakeMoney || s.action == ConversationAction::BuyItem) {
+                int amount = int(s.money);
+                if (ImGui::InputInt(s.action == ConversationAction::BuyItem ? "Total price (Pokedollars)" : "Pokedollars", &amount)) {
+                    s.money = unsigned(std::clamp(amount, s.action == ConversationAction::IfMoney ? 0 : 1, 9999999));
+                    changed = true;
+                }
+                if (s.action == ConversationAction::IfMoney) {
+                    int comparison = int(s.comparison);
+                    if (ImGui::Combo("Compare", &comparison, "Equal\0Not equal\0Less\0Less or equal\0Greater\0Greater or equal\0")) {
+                        s.comparison = ConversationComparison(comparison);
+                        changed = true;
+                    }
+                    ImGui::TextWrapped("Checks the wallet without changing it. For a shop, check affordability, "
+                                       "give the reward, then take money only in the successful delivery branch.");
+                } else if (s.action == ConversationAction::BuyItem)
+                    ImGui::TextWrapped("Price covers the entire quantity. Charges only if the items are delivered. "
+                                       "Not purchased covers insufficient money, a full bag, or failed delivery.");
+                else if (s.action == ConversationAction::TakeMoney)
+                    ImGui::TextWrapped("Deducts the full amount or takes nothing. Use Paid for the next action "
+                                       "and Not enough money for refusal dialogue.");
+                else
+                    ImGui::TextWrapped("Adds the full amount or gives nothing if it would exceed the wallet limit of 9,999,999.");
+            }
             if (s.action == ConversationAction::Encounter)
                 changed |= scene_tools_.encounter(s);
             if (s.action == ConversationAction::TrainerBattle)
@@ -678,7 +764,8 @@ void ConversationEditor::visual() {
             if (s.action >= ConversationAction::SetFlag && s.action <= ConversationAction::IfWork) {
                 bool flag = s.action == ConversationAction::SetFlag ||
                             s.action == ConversationAction::IfFlag;
-                changed |= ImGui::InputInt(flag ? "Flag ID" : "Work ID", &s.state_id);
+                changed |= ImGui::InputInt(flag ? "Flag ID" : "Work ID", &s.state_id, 1, 100,
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
                 if (flag) {
                     bool enabled = s.value != 0;
                     if (ImGui::Checkbox("On", &enabled)) {
@@ -700,6 +787,9 @@ void ConversationEditor::visual() {
                 ImGui::TextWrapped(
                     "Uses game state IDs. No unused ID or story-stage name is inferred.");
             }
+            if (conversation_work_action(s.action) && !conversation_work_id_valid(s.state_id))
+                ImGui::TextWrapped("Choose a work ID (16384-49151) and press Enter before compiling. "
+                                   "No unused game variable is allocated automatically.");
             bool boundary =
                 s.action == ConversationAction::Begin || s.action == ConversationAction::End;
             ImGui::BeginDisabled(boundary);
@@ -769,26 +859,35 @@ void ConversationEditor::visual() {
             {ConversationAction::FacePlayer, ConversationAction::Rotate,
              ConversationAction::PlayMotion, ConversationAction::MoveTo,
              ConversationAction::WaitAction, ConversationAction::WaitMotion,
-             ConversationAction::Move},
+             ConversationAction::Move, ConversationAction::ShowActor, ConversationAction::HideActor,
+             ConversationAction::WarpPlayer},
             {ConversationAction::SetFlag, ConversationAction::SetWork, ConversationAction::IfFlag,
-             ConversationAction::IfWork},
-            {ConversationAction::GiveItem, ConversationAction::Encounter,
+             ConversationAction::IfWork, ConversationAction::IfPokemon, ConversationAction::IfItem,
+             ConversationAction::IfMoney, ConversationAction::AddWork, ConversationAction::SubtractWork},
+            {ConversationAction::GiveItem, ConversationAction::TakeItem, ConversationAction::GivePokemon,
+             ConversationAction::GiveMoney, ConversationAction::TakeMoney,
+             ConversationAction::HealParty, ConversationAction::BuyItem,
+             ConversationAction::TradeItems, ConversationAction::TradePokemon, ConversationAction::Encounter,
              ConversationAction::TrainerBattle, ConversationAction::IfBattleResult}};
         const char *titles[] = {"Dialogue and timing", "Characters", "Game state",
-                                "Items and battles"};
+                                "Gifts, trades and battles"};
         for (unsigned group = 0; group < std::size(groups); ++group) {
             if (!ImGui::BeginMenu(titles[group], !defeat_insertion || group == 2))
                 continue;
             for (auto action : groups[group]) {
                 bool allowed = !defeat_insertion || action == ConversationAction::SetFlag ||
                                action == ConversationAction::SetWork;
-                if (ImGui::MenuItem(name(action), nullptr, false, allowed)) {
+                if (TutorialWidgets::MenuItem("conversation_editor", name(action), nullptr, false, allowed)) {
                     ConversationStep s;
                     s.id = next_id(draft.steps);
                     s.action = action;
                     if (actor_.kind != InteractionTargetKind::Npc)
                         s.actor = -1;
                     scene_tools_.initialize(s);
+                    if (action == ConversationAction::AddWork || action == ConversationAction::SubtractWork)
+                        s.value = 1;
+                    if (action == ConversationAction::IfMoney)
+                        s.comparison = ConversationComparison::GreaterEqual;
                     if (action == ConversationAction::MoveTo)
                         s.wait_for_completion = true;
                     if (action == ConversationAction::IfBattleResult)
@@ -845,6 +944,54 @@ void ConversationEditor::visual() {
             ImGui::EndMenu();
         }
         ImGui::TextDisabled("Select a branch to insert inside it, or a step to insert after it.");
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(defeat_insertion || draft.custom);
+    if (TutorialWidgets::Button("conversation_editor", "Add template..."))
+        ImGui::OpenPopup("Interaction template");
+    ImGui::EndDisabled();
+    if (ImGui::BeginPopup("Interaction template")) {
+        static int kind = 0, flag = -1;
+        static ConversationStep reward;
+        static std::string template_error;
+        if (ImGui::Combo("Template", &kind,
+                         "One-time item gift\0One-time Pokemon gift\0Repeatable item trade\0Repeatable Pokemon trade\0Trainer challenge\0Conditional dialogue\0One-time delivery quest\0"))
+            template_error.clear();
+        auto type = InteractionTemplate(kind);
+        if (interaction_template_needs_flag(type)) {
+            ImGui::InputInt(type == InteractionTemplate::ConditionalDialogue ? "Condition flag" : "Completion flag", &flag);
+            ImGui::TextWrapped("Choose a flag deliberately. This does not allocate an unused flag or change its initial value.");
+        }
+        if (type == InteractionTemplate::ItemGift || type == InteractionTemplate::ItemTrade || type == InteractionTemplate::DeliveryQuest) {
+            reward.action = type == InteractionTemplate::ItemGift ? ConversationAction::GiveItem : ConversationAction::TradeItems;
+            scene_tools_.reward(reward);
+        } else if (type == InteractionTemplate::PokemonGift || type == InteractionTemplate::PokemonTrade) {
+            reward.action = type == InteractionTemplate::PokemonGift ? ConversationAction::GivePokemon : ConversationAction::TradePokemon;
+            scene_tools_.pokemon_reward(reward);
+        } else if (type == InteractionTemplate::TrainerChallenge) {
+            reward.action = ConversationAction::TrainerBattle;
+            scene_tools_.trainer(reward);
+            ImGui::Text("Defeated flag: %u (set by the game's battle result)", 3036 + reward.trainer);
+        }
+        ImGui::Separator();
+        ImGui::TextWrapped(type == InteractionTemplate::ConditionalDialogue
+            ? "Adds separate dialogue for the flag's On and Off states. It does not write the flag."
+            : interaction_template_needs_flag(type)
+            ? "Checks completion before the reward and sets the flag only in the successful branch. Failed delivery can be retried."
+            : type == InteractionTemplate::TrainerChallenge
+            ? "Checks the trainer's defeated flag, asks before battling, and keeps defeat recovery separate from victory dialogue."
+            : "Asks before trading and includes success, failure and declined branches. No completion flag is added.");
+        ImGui::TextWrapped("Inserts at the selected step or branch. Generated steps and messages remain individually editable. Insertion is one undo step.");
+        if (TutorialWidgets::Button("conversation_editor", "Insert template")) {
+            try {
+                selected_ = insert_interaction_template(draft, selected_, insert_otherwise_, {type, flag, reward});
+                changed = true;
+                template_error.clear();
+                ImGui::CloseCurrentPopup();
+            } catch (const std::exception &error) { template_error = error.what(); }
+        }
+        if (!template_error.empty()) ImGui::TextWrapped("%s", template_error.c_str());
         ImGui::EndPopup();
     }
     if (changed) {
@@ -1104,7 +1251,12 @@ void ConversationEditor::preview() {
             while (!preview_queue_.empty() && ++budget < 500) {
                 auto s = preview_queue_.front();
                 preview_queue_.erase(preview_queue_.begin());
-                if (s.action == ConversationAction::GiveItem ||
+                if (s.action == ConversationAction::GiveItem || s.action == ConversationAction::GivePokemon ||
+                    s.action == ConversationAction::TradePokemon || s.action == ConversationAction::TradeItems ||
+                    s.action == ConversationAction::IfPokemon || s.action == ConversationAction::IfItem ||
+                    s.action == ConversationAction::IfMoney || s.action == ConversationAction::GiveMoney ||
+                    s.action == ConversationAction::TakeMoney || s.action == ConversationAction::TakeItem ||
+                    s.action == ConversationAction::BuyItem ||
                     (s.action == ConversationAction::Encounter ||
                      s.action == ConversationAction::TrainerBattle)) {
                     preview_text_ =
@@ -1117,6 +1269,26 @@ void ConversationEditor::preview() {
                         preview_battle_result_ == s.value ? s.children : s.otherwise;
                     preview_queue_.insert(preview_queue_.begin(), branch.begin(), branch.end());
                     continue;
+                }
+                if (s.action == ConversationAction::WarpPlayer) {
+                    preview_text_ = "Warp to zone " + std::to_string(s.warp_zone) + ". Interaction ends here; no map change is simulated.";
+                    preview_queue_.clear();
+                    break;
+                }
+                if (s.action == ConversationAction::HealParty || s.action == ConversationAction::ShowActor ||
+                    s.action == ConversationAction::HideActor) {
+                    preview_text_ = std::string(name(s.action)) + ". Game state and scene are not changed in this preview.";
+                    break;
+                }
+                if (s.action == ConversationAction::AddWork || s.action == ConversationAction::SubtractWork) {
+                    preview_text_ = std::string(name(s.action)) + " " + std::to_string(s.state_id);
+                    if (preview_work_.contains(s.state_id)) {
+                        auto &value = preview_work_[s.state_id];
+                        value = std::clamp(value, 0, 65535);
+                        value = std::clamp(value + (s.action == ConversationAction::AddWork ? s.value : -s.value), 0, 65535);
+                        preview_text_ += " = " + std::to_string(value);
+                    } else preview_text_ += ": initial value is unknown. Set it earlier in the preview to simulate arithmetic.";
+                    break;
                 }
                 if (s.action == ConversationAction::MoveTo) {
                     preview_text_ = "Move to world position " + std::to_string(s.destination[0]) +

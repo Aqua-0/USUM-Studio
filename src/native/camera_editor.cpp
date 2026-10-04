@@ -9,6 +9,64 @@
 #include "native/imgui_renderer.h"
 #include <bx/math.h>
 namespace studio {
+namespace {
+std::optional<std::pair<SpatialPoint, SpatialPoint>>
+selected_region_bounds(const CameraDocument &document, const SpatialScene &scene,
+                       const std::string &group) {
+    if (group.empty() ||
+        std::none_of(document.fields().begin(), document.fields().end(), [&](auto &field) {
+            return field.group == group;
+        }))
+        return {};
+    SpatialPoint low{INFINITY, INFINITY, INFINITY}, high{-INFINITY, -INFINITY, -INFINITY};
+    bool found = false;
+    auto include = [&](const SpatialPoint &point) {
+        if (!std::all_of(point.begin(), point.end(), [](float v) {
+                return std::isfinite(v);
+            }))
+            return;
+        found = true;
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            low[axis] = std::min(low[axis], point[axis]);
+            high[axis] = std::max(high[axis], point[axis]);
+        }
+    };
+    if (group.starts_with("Camera ")) {
+        auto camera = std::stoi(group.substr(7));
+        for (auto &region : scene.regions)
+            if (region.kind == SpatialKind::Camera && region.camera == camera)
+                for (auto &vertex : region.vertices)
+                    include(vertex.position);
+    } else {
+        std::map<std::string, SpatialPoint> points;
+        float radius = 0;
+        for (auto &field : document.fields()) {
+            if (field.group != group)
+                continue;
+            if (field.label == "Radius")
+                radius = float(document.value(field));
+            if (field.label.starts_with("Center ") || field.label.starts_with("Corner ") ||
+                field.label.starts_with("Trigger corner ") ||
+                field.label.starts_with("Clamp corner ")) {
+                auto axis = std::string("XYZ").find(field.label.back());
+                if (axis != std::string::npos)
+                    points[field.label.substr(0, field.label.size() - 2)][axis] =
+                        float(document.value(field));
+            }
+        }
+        for (auto &[name, point] : points) {
+            include(point);
+            if (name == "Center") {
+                include({point[0] - radius, point[1], point[2] - radius});
+                include({point[0] + radius, point[1], point[2] + radius});
+            }
+        }
+    }
+    if (!found)
+        return {};
+    return std::pair{low, high};
+}
+}
 void CameraEditor::set_scene(std::shared_ptr<Environment> scene, unsigned area,
                              const std::filesystem::path &dump) {
     scene_ = std::move(scene);
@@ -485,8 +543,33 @@ bool CameraEditor::draw_workspace(bool loading) {
     ImGui::SameLine();
     if (studio::TutorialWidgets::Button("camera_editor", "Frame player"))
         view_.focus_start(renderer_.player.position);
+    auto region_bounds = document_ && scene_
+                             ? selected_region_bounds(*document_, scene_->spatial, group_)
+                             : std::nullopt;
+    auto frame_selected_region = [&] {
+        auto bounds = document_ && scene_
+                          ? selected_region_bounds(*document_, scene_->spatial, group_)
+                          : std::nullopt;
+        if (loading || !bounds)
+            return;
+        renderer_.player.active = false;
+        follow_ = false;
+        view_.fit(bounds->first, bounds->second);
+        view_.bounds_low = scene_->low;
+        view_.bounds_high = scene_->high;
+    };
+    ImGui::BeginDisabled(loading || !region_bounds);
+    if (TutorialWidgets::Button("camera_editor", "Frame selected region"))
+        frame_selected_region();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(region_bounds ? "Frame the selected region (F over the viewport). "
+                                          "Switches out of player preview."
+                                        : "Select a circle, trigger, clamp, keep-out region, or a "
+                                          "camera with activation regions.");
     if (ImGui::CollapsingHeader("Controls")) {
         ImGui::TextWrapped("Player: WASD, Ctrl to run.");
+        ImGui::TextWrapped("F: frame selected region.");
         ImGui::TextWrapped("%s", viewport_navigation_help);
     }
     ImGui::SeparatorText("Regions");
@@ -606,6 +689,11 @@ bool CameraEditor::draw_workspace(bool loading) {
     ImGui::Image(ImTextureID(ImGuiRenderer::image_id(texture, false)), size, {0, flip ? 1.f : 0.f},
                  {1, flip ? 0.f : 1.f});
     hovered_ = ImGui::IsItemHovered();
+    if (hovered_ && !io.WantTextInput && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt &&
+        !io.KeySuper && !loading && !kind_ && !export_.valid() &&
+        (SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS) &&
+        ImGui::IsKeyPressed(ImGuiKey_F, false))
+        frame_selected_region();
     if (hovered_ && (!player.active || overview_)) {
         viewport_navigation(view_, window_, true);
     }

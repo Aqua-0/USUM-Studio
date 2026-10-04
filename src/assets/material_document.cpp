@@ -194,6 +194,7 @@ void apply(SceneMaterial &m, const MaterialEdit &edit) {
     m.alpha_function = edit.alpha_function;
     m.alpha_reference = edit.alpha_reference;
     m.blend_state = edit.blend;
+    if (m.depth_state != edit.depth) m.runtime_depth_state = edit.depth;
     m.depth_state = edit.depth;
     m.layer = edit.layer;
     m.priority = edit.priority;
@@ -874,7 +875,7 @@ std::map<std::size_t, Bytes> MaterialDocument::compiled_members() const {
         return it->second;
     };
     auto &link = model_link(model);
-    if (edits_ != initial_ || !touched_.empty()) {
+    if (edits_ != initial_ || !touched_.empty() || (structural_ && structural_version_ != 0)) {
         auto &bytes = member(link.source);
         bytes = replace_asset_resource(bytes, link.path, compile());
     }
@@ -933,6 +934,15 @@ std::string MaterialDocument::borrow_effect(std::size_t material, const Material
         members[index] = bytes;
     replace_members(members);
     return effect.summary;
+}
+void MaterialDocument::copy_meshes(const MaterialDocument &donor,
+                                   const std::set<std::size_t> &draws, unsigned bone) {
+    auto imported = copy_model_meshes(preview_model(), donor.preview_model(), draws, bone);
+    auto members = compiled_members();
+    for (auto &[index, bytes] : imported.members)
+        members[index] = std::move(bytes);
+    commit();
+    replace_members(members);
 }
 void MaterialDocument::replace_members(const std::map<std::size_t, Bytes> &input) {
     auto members = input;
@@ -1757,9 +1767,45 @@ void MaterialDocument::restore(const std::string &text) {
         throw;
     }
 }
+Bytes normalize_material_depth_commands(View original) {
+    auto parsed = Model::parse(original);
+    Bytes out(original.begin(), original.end());
+    for (const auto &section : parsed.sections) {
+        if (section.kind != "material") continue;
+        auto raw = slice(original, section.offset, section.size);
+        auto p = metadata(raw) + 168;
+        auto count = u32(raw, p); p += 4;
+        for (unsigned i = 0; i < count; ++i) p += 5 + raw[p + 4] + 42;
+        p = aligned(p, 16);
+        auto writes = commands(slice(raw, p + 32, u32(raw, p)));
+        std::uint32_t depth = 0;
+        for (auto c : writes) if (c.reg == 0x107)
+            for (unsigned lane = 0; lane < 4; ++lane) if (c.mask & (1u << lane)) {
+                auto mask = 255u << (lane * 8);
+                depth = (depth & ~mask) | (c.value & mask);
+            }
+        // The runtime cache reads the first depth command, while the GPU executes all of them.
+        for (auto c : writes) if (c.reg == 0x107)
+            put32(out, section.offset + p + 32 + c.offset, depth);
+    }
+    return out;
+}
+void MaterialDocument::repair_runtime_depth() {
+    auto link = model_link(model);
+    auto members = compiled_members();
+    const auto &source = model.sources.at(link.source);
+    auto member = members.contains(source.member) ? members.at(source.member) : source.original;
+    auto original = asset_resource(member, link.path);
+    auto repaired = normalize_material_depth_commands(original);
+    if (repaired == asset_resource(source.original, link.path)) return;
+    members[source.member] = replace_asset_resource(member, link.path, repaired);
+    commit();
+    replace_members(members);
+}
 Bytes MaterialDocument::compile() const {
     auto &link = model_link(model);
-    auto original = asset_resource(model.sources.at(link.source).original, link.path);
+    auto original = normalize_material_depth_commands(
+        asset_resource(model.sources.at(link.source).original, link.path));
     if (!changed())
         return original;
     auto parsed = Model::parse(original);
@@ -1855,6 +1901,8 @@ Bytes MaterialDocument::compile() const {
             append32(stream, 0x20100);
         }
         command(stream, 0x101, edit.blend);
+        for (auto c : commands(stream))
+            if (c.reg == 0x107) put32(stream, c.offset, edit.depth);
         command(stream, 0x107, edit.depth);
         for (unsigned unit = 0; unit < 3; ++unit)
             if (edit.textures[unit].transform != base.textures[unit].transform) {

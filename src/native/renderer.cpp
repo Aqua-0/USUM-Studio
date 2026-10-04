@@ -1,3 +1,4 @@
+#include "scene/point_sprites.h"
 #include "scene/resource_reuse.h"
 #include "scene/material_draw_order.h"
 #include "native/renderer.h"
@@ -118,6 +119,7 @@ EnvironmentRenderer::EnvironmentRenderer(const std::filesystem::path &path)
     uv_v_ = bgfx::createUniform("u_uvRowV", bgfx::UniformType::Vec4, 3);
     buffer_ = bgfx::createUniform("u_buffer", bgfx::UniformType::Vec4);
     preview_ = bgfx::createUniform("u_preview", bgfx::UniformType::Vec4);
+    inspection_ = bgfx::createUniform("u_inspection", bgfx::UniformType::Vec4);
     texture_precision_ = bgfx::createUniform("u_texturePrecision", bgfx::UniformType::Vec4);
     cutaway_ = bgfx::createUniform("u_cutaway", bgfx::UniformType::Vec4);
     light_ = bgfx::createUniform("u_lighting", bgfx::UniformType::Vec4);
@@ -215,6 +217,7 @@ EnvironmentRenderer::~EnvironmentRenderer() {
     bgfx::destroy(buffer_);
     bgfx::destroy(preview_);
     bgfx::destroy(texture_precision_);
+    bgfx::destroy(inspection_);
     bgfx::destroy(cutaway_);
     bgfx::destroy(projection_rows_);
     bgfx::destroy(projection_options_);
@@ -367,8 +370,12 @@ void EnvironmentRenderer::preview_vertices(std::size_t draw,
     require(scene_ && draw < draws_.size() &&
                 vertices.size() == scene_->draws.at(draw).vertices.size(),
             "Geometry preview does not match the uploaded mesh");
+    auto expanded = scene_->materials.at(scene_->draws.at(draw).material).point_sprites
+                        ? point_sprite_vertices(vertices)
+                        : std::vector<SceneVertex>{};
+    const auto &uploaded = expanded.empty() ? vertices : expanded;
     auto buffer = bgfx::createVertexBuffer(
-        bgfx::copy(vertices.data(), narrow(vertices.size() * sizeof(SceneVertex))), layout_);
+        bgfx::copy(uploaded.data(), narrow(uploaded.size() * sizeof(SceneVertex))), layout_);
     require(bgfx::isValid(buffer), "Geometry preview buffer allocation failed");
     bgfx::destroy(draws_[draw].vertices);
     draws_[draw].vertices = buffer;
@@ -411,11 +418,17 @@ void EnvironmentRenderer::upload_step(std::size_t budget) {
     for(std::size_t index=0;index<draws_.size();++index) {
         if(bgfx::isValid(draws_[index].vertices) && bgfx::isValid(draws_[index].indices)) continue;
         auto &d = scene_->draws[index];
+        bool sprites = scene_->materials.at(d.material).point_sprites;
+        auto expanded = sprites ? point_sprite_vertices(d.vertices) : std::vector<SceneVertex>{};
+        const auto &vertices = sprites ? expanded : d.vertices;
+        auto indices = sprites ? point_sprite_indices(d.indices) : std::vector<std::uint32_t>{};
         auto vb = bgfx::createVertexBuffer(
-            bgfx::copy(d.vertices.data(), narrow(d.vertices.size() * sizeof(SceneVertex))),
-            layout_);
-        auto ib =
-            bgfx::createIndexBuffer(bgfx::copy(d.indices.data(), narrow(d.indices.size() * 2)));
+            bgfx::copy(vertices.data(), narrow(vertices.size() * sizeof(SceneVertex))), layout_);
+        auto ib = sprites
+                      ? bgfx::createIndexBuffer(
+                            bgfx::copy(indices.data(), narrow(indices.size() * 4)), BGFX_BUFFER_INDEX32)
+                      : bgfx::createIndexBuffer(
+                            bgfx::copy(d.indices.data(), narrow(d.indices.size() * 2)));
         if (!bgfx::isValid(vb) || !bgfx::isValid(ib)) {
             if (bgfx::isValid(vb))
                 bgfx::destroy(vb);
@@ -424,7 +437,8 @@ void EnvironmentRenderer::upload_step(std::size_t budget) {
             throw std::runtime_error("Scene buffer allocation failed");
         }
         draws_[index]={vb, ib};
-        auto n = d.vertices.size() * sizeof(SceneVertex) + d.indices.size() * 2;
+        auto n = vertices.size() * sizeof(SceneVertex) +
+                 (sprites ? indices.size() * 4 : d.indices.size() * 2);
         used += n;
         geometry_bytes += n;
         if (used >= budget)
@@ -437,7 +451,11 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                                                 bool picking) {
     if (!picking && retain_frame_during_upload && scene_ && !ready() && bgfx::isValid(complete_frame_))
         return complete_frame_;
-    const bool refresh_active = refresh.active(), draw_wireframe = wireframe && !refresh_active;
+    const bool refresh_active = refresh.active();
+    const bool inspecting = shading_view != ShadingView::Shaded && !picking && !refresh_active;
+    const bool draw_wireframe = wireframe && !refresh_active && !inspecting;
+    const bool shared_outline_depth = pokemon_preview.shared_outline_depth() &&
+                                      !draw_wireframe && !picking && !refresh_active && !inspecting;
     auto &target = picking ? pick_target_ : target_;
     auto &target_width = picking ? pick_width_ : width_;
     auto &target_height = picking ? pick_height_ : height_;
@@ -471,7 +489,8 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
     bgfx::setViewMode(view_id, bgfx::ViewMode::Sequential);
     bgfx::setViewFrameBuffer(view_id, target);
     bgfx::setViewRect(view_id, 0, 0, std::uint16_t(width), std::uint16_t(height));
-    bgfx::setViewClear(view_id, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH | BGFX_CLEAR_STENCIL,
+    bgfx::setViewClear(view_id, shared_outline_depth ? BGFX_CLEAR_COLOR
+                                                   : BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH | BGFX_CLEAR_STENCIL,
                        picking ? 0u : background_color, 1.f, 0);
     bgfx::setViewTransform(view_id, view, projection);
     bgfx::touch(view_id);
@@ -484,29 +503,37 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
         bgfx::setViewTransform(id, view, projection);
         bgfx::setViewClear(id, BGFX_CLEAR_NONE);
     }
-    bool draw_outlines = outlines && !draw_wireframe && !picking && !refresh_active;
-    if (draw_outlines) {
+    bool draw_outlines = outlines && !draw_wireframe && !picking && !refresh_active && !inspecting;
+    const bool draw_edge_map = draw_outlines || shared_outline_depth;
+    const auto edge_view = shared_outline_depth ? RenderViews::edge_prepass : RenderViews::edge_map;
+    if (draw_edge_map) {
+        if (bgfx::isValid(edge_target_) && edge_depth_shared_ != shared_outline_depth) {
+            bgfx::destroy(edge_target_);
+            edge_target_ = BGFX_INVALID_HANDLE;
+        }
         if (!bgfx::isValid(edge_target_)) {
             bgfx::TextureHandle attachments[] = {
                 bgfx::createTexture2D(std::uint16_t(width), std::uint16_t(height), false, 1,
                                       bgfx::TextureFormat::RGBA8,
                                       BGFX_TEXTURE_RT | BGFX_SAMPLER_U_CLAMP |
                                           BGFX_SAMPLER_V_CLAMP),
-                bgfx::createTexture2D(std::uint16_t(width), std::uint16_t(height), false, 1,
-                                      bgfx::TextureFormat::D24S8, BGFX_TEXTURE_RT_WRITE_ONLY)};
+                shared_outline_depth ? bgfx::getTexture(target, 1)
+                                     : bgfx::createTexture2D(std::uint16_t(width), std::uint16_t(height), false, 1,
+                                                            bgfx::TextureFormat::D24S8, BGFX_TEXTURE_RT_WRITE_ONLY)};
             require(bgfx::isValid(attachments[0]) && bgfx::isValid(attachments[1]),
                     "Could not allocate outline textures");
             edge_target_ = bgfx::createFrameBuffer(2, attachments, true);
             require(bgfx::isValid(edge_target_), "Could not allocate outline target");
+            edge_depth_shared_ = shared_outline_depth;
         }
-        auto id = RenderViews::edge_map;
+        auto id = edge_view;
         bgfx::setViewName(id, "Material edge map");
         bgfx::setViewMode(id, bgfx::ViewMode::Sequential);
         bgfx::setViewFrameBuffer(id, edge_target_);
         bgfx::setViewRect(id, 0, 0, std::uint16_t(width), std::uint16_t(height));
         bgfx::setViewTransform(id, view, projection);
         bgfx::setViewClear(id, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH | BGFX_CLEAR_STENCIL, 0x808080ff,
-                           1.f, 0);
+                           1.f, shared_outline_depth ? 255 : 0);
         bgfx::touch(id);
     }
     if (scene_)
@@ -552,7 +579,14 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                     continue;
                 auto &d = draws_[i];
                 if(!bgfx::isValid(d.vertices) || !bgfx::isValid(d.indices)) continue;
-                auto &mat = materials_[scene_->draws[i].material];
+                auto material_index = scene_->draws[i].material;
+                std::optional<SceneMaterial> battle_material;
+                if (pokemon_preview.battle() && material_index >= pokemon_material_begin &&
+                    material_index < pokemon_material_end) {
+                    battle_material = materials_[material_index];
+                    apply_pokemon_battle_preview(*battle_material, pokemon_preview);
+                }
+                auto &mat = battle_material ? *battle_material : materials_[material_index];
                 bool late = mat.screen_refraction ||
                             (mat.layer >= 4 && refraction_scopes.contains(mat.resource_scope));
                 if (late != (phase == 1))
@@ -560,7 +594,7 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                 bool missing = false;
                 if (!refresh.bind(scene_->materials[scene_->draws[i].material]))
                     continue;
-                if (late && !picking && !draw_wireframe && !refresh_active && !refraction_started) {
+                if (late && !picking && !draw_wireframe && !refresh_active && !inspecting && !refraction_started) {
                     if (!bgfx::isValid(scene_copy_)) {
                         scene_copy_ = bgfx::createTexture2D(
                             std::uint16_t(width), std::uint16_t(height), false, 1,
@@ -594,7 +628,7 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                      (source_draw.sky_part == 0 && sky_type != 0) ||
                      (source_draw.sky_part == 1 && sky_type == 0)))
                     continue;
-                if (source_draw.weather_mask && !picking && particles_enabled && !particles_drawn) {
+                if (source_draw.weather_mask && !picking && particles_enabled && !inspecting && !particles_drawn) {
                     particles_.render(view_id, scene_->weather_particles, weather_effect,
                                       playback.seconds, particle_origin, view);
                     particles_drawn = true;
@@ -656,7 +690,7 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                 float edge_options[4] = {0, 0, 0, -1};
                 bgfx::setUniform(edge_options_, edge_options);
                 bool selected =
-                    !picking && !refresh_active && i < highlighted_.size() && highlighted_[i];
+                    !picking && !refresh_active && !inspecting && i < highlighted_.size() && highlighted_[i];
                 float highlight[4] = {.55f, .55f, .55f, 0.f};
                 bgfx::setUniform(selection_color_, highlight);
                 auto id = unsigned(i + 1);
@@ -706,7 +740,7 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                         rows_u[unit] = {1, 0, 0, float(unit)};
                         rows_v[unit] = {0, 1, 0, 0};
                     }
-                    bool refracted = unit == 0 && mat.screen_refraction;
+                    bool refracted = unit == 0 && mat.screen_refraction && !inspecting;
                     if (refracted) {
                         rows_u[unit] = {1, 0, 0, 0};
                         rows_v[unit] = {0, 1, 0, 0};
@@ -785,6 +819,11 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                     : mat.height_tint     ? 1.f
                                           : 0.f,
                     mat.vertex_parameters[0], mat.vertex_parameters[1], mat.vertex_parameters[3]};
+                if (mat.point_sprites) {
+                    vertex_effect[0] = 5;
+                    vertex_effect[1] = mat.vertex_parameters[0];
+                    vertex_effect[2] = mat.vertex_parameters[2];
+                }
                 if (source_draw.projected_shadow) {
                     vertex_effect[0] = 4;
                     for (unsigned k = 0; k < 3; ++k)
@@ -827,7 +866,12 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                 bgfx::setUniform(preview_, preview);
                 const float precision[4] = {pica_texture_precision ? 1.f : 0.f, 0.f, 0.f, 0.f};
                 bgfx::setUniform(texture_precision_, precision);
-                float cut[4] = {cutaway ? 1.f : 0.f, cut_height, fallback ? 1.f : 0.f,
+                const float inspection[4] = {
+                    inspecting ? float(shading_view) : 0.f,
+                    float(shading_view == ShadingView::UVs ? inspection_uv : inspection_texture),
+                    float(inspection_channel), inspection_alpha_test ? 1.f : 0.f};
+                bgfx::setUniform(inspection_, inspection);
+                float cut[4] = {cutaway ? 1.f : 0.f, cut_height, fallback && !inspecting ? 1.f : 0.f,
                                 draw_wireframe && !picking ? 1.f : 0.f};
                 bgfx::setUniform(cutaway_, cut);
                 auto transform = preview_transforms.contains(i) ? preview_transforms.at(i)
@@ -841,6 +885,13 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                 bgfx::setTransform(model);
                 bgfx::setVertexBuffer(0, d.vertices);
                 if ((draw_wireframe && !picking) || selected) {
+                    if (!bgfx::isValid(d.edges) && mat.point_sprites) {
+                        auto edges = point_sprite_indices(source_draw.indices, true);
+                        d.edges = bgfx::createIndexBuffer(
+                            bgfx::copy(edges.data(), narrow(edges.size() * 4)), BGFX_BUFFER_INDEX32);
+                        require(bgfx::isValid(d.edges), "Sprite wireframe allocation failed");
+                        geometry_bytes += edges.size() * 4;
+                    }
                     if (!bgfx::isValid(d.edges)) {
                         std::vector<std::uint32_t> pairs;
                         for (unsigned j = 0; j + 2 < source_draw.indices.size(); j += 3)
@@ -884,14 +935,14 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                 if (source_draw.weather_mask)
                     state &=
                         ~(BGFX_STATE_DEPTH_TEST_MASK | BGFX_STATE_WRITE_Z | BGFX_STATE_CULL_MASK);
-                if (refresh_active)
+                if (refresh_active || inspecting)
                     state = (state & (BGFX_STATE_CULL_MASK | BGFX_STATE_FRONT_CCW)) |
                             BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z |
                             BGFX_STATE_DEPTH_TEST_LEQUAL;
                 if (draw_wireframe && !picking)
                     state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z |
                             BGFX_STATE_DEPTH_TEST_LEQUAL | BGFX_STATE_PT_LINES | BGFX_STATE_MSAA;
-                if (source_draw.projected_shadow && !picking && !draw_wireframe) {
+                if (source_draw.projected_shadow && !picking && !draw_wireframe && !inspecting) {
                     state &= ~BGFX_STATE_WRITE_Z;
                     if ((mat.depth_state & 1) && ((mat.depth_state >> 4) & 7) == 0)
                         state = (state & ~BGFX_STATE_DEPTH_TEST_MASK) | BGFX_STATE_DEPTH_TEST_NEVER;
@@ -901,20 +952,22 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                 }
                 bgfx::setState(state, rgba);
                 bgfx::setStencil(
-                    source_draw.projected_shadow
+                    source_draw.projected_shadow && !inspecting
                         ? (BGFX_STENCIL_TEST_NOTEQUAL | BGFX_STENCIL_FUNC_REF(128) |
                            BGFX_STENCIL_FUNC_RMASK(128) | BGFX_STENCIL_OP_FAIL_S_KEEP |
                            BGFX_STENCIL_OP_FAIL_Z_KEEP | BGFX_STENCIL_OP_PASS_Z_REPLACE)
-                    : refresh_active || (draw_wireframe && !picking) ? BGFX_STENCIL_NONE
+                    : refresh_active || inspecting || (draw_wireframe && !picking) ? BGFX_STENCIL_NONE
                                                                      : material_stencil(mat));
                 bool edge_draw =
-                    draw_outlines && !source_draw.projected_shadow && source_draw.sky_part < 0 &&
+                    draw_edge_map && !source_draw.projected_shadow && source_draw.sky_part < 0 &&
                     !source_draw.weather_mask &&
-                    (mat.edge_type != 2 || mat.id_edge_enabled || (mat.stencil_test & 1));
+                    (shared_outline_depth
+                         ? material_index >= pokemon_material_begin && material_index < pokemon_material_end && mat.edge_type != 2
+                         : mat.edge_type != 2 || mat.id_edge_enabled || (mat.stencil_test & 1));
                 bgfx::submit(view_id, program_, 0,
                              (selected || edge_draw) ? BGFX_DISCARD_NONE : BGFX_DISCARD_ALL);
                 if (edge_draw) {
-                    edge_options[0] = 1;
+                    edge_options[0] = shared_outline_depth ? 2.f : 1.f;
                     edge_options[1] = float(mat.edge_type);
                     edge_options[2] = float(std::min(mat.edge_id, 255u)) / 255.f;
                     edge_options[3] = float(mat.edge_alpha_mask);
@@ -929,8 +982,20 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
                     if (mat.edge_type == 4 && !mat.id_edge_enabled)
                         edge_state |=
                             state & (BGFX_STATE_BLEND_MASK | BGFX_STATE_BLEND_EQUATION_MASK);
+                    if (shared_outline_depth) {
+                        if (mat.edge_type == 4) {
+                            edge_state = state;
+                            auto stencil = material_stencil(mat);
+                            stencil = (stencil & ~BGFX_STENCIL_OP_PASS_Z_MASK) | BGFX_STENCIL_OP_PASS_Z_KEEP;
+                            bgfx::setStencil(stencil);
+                        } else {
+                            edge_state = (edge_state & ~(BGFX_STATE_DEPTH_TEST_MASK | BGFX_STATE_WRITE_Z)) |
+                                         BGFX_STATE_DEPTH_TEST_LEQUAL | BGFX_STATE_WRITE_Z;
+                            bgfx::setStencil(BGFX_STENCIL_NONE);
+                        }
+                    }
                     bgfx::setState(edge_state, rgba);
-                    bgfx::submit(RenderViews::edge_map, program_, 0,
+                    bgfx::submit(edge_view, program_, 0,
                                  selected ? BGFX_DISCARD_NONE : BGFX_DISCARD_ALL);
                 }
                 if (selected) {
@@ -951,12 +1016,12 @@ bgfx::TextureHandle EnvironmentRenderer::render(unsigned width, unsigned height,
 
     if (scene_)
         spatial.render(view_id, picking, unsigned(scene_->draws.size() + 1));
-    if (!picking && scene_ && particles_enabled && !particles_drawn)
+    if (!picking && scene_ && particles_enabled && !inspecting && !particles_drawn)
         particles_.render(view_id, scene_->weather_particles, weather_effect, playback.seconds,
                           particle_origin, view);
     if (draw_outlines)
         post_.outlines(target, bgfx::getTexture(edge_target_), width, height, outline_width);
-    if (!picking && bloom_enabled) {
+    if (!picking && bloom_enabled && !inspecting) {
         auto mask = white_;
         std::array<float, 2> scale{1, 1};
         if (lighting.context < bloom_masks_.size() &&

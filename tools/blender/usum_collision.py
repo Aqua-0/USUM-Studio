@@ -1,4 +1,4 @@
-bl_info = {"name": "USUMStudio Mesh Exchange", "author": "USUMStudio contributors", "version": (1, 1, 0), "blender": (4, 2, 0), "location": "File > Import/Export; 3D View > Sidebar > Collision / USUMStudio", "description": "Edit collision and source-linked object geometry for USUMStudio", "category": "Import-Export"}
+bl_info = {"name": "USUMStudio Mesh Exchange", "author": "USUMStudio contributors", "version": (1, 1, 1), "blender": (4, 2, 0), "location": "File > Import/Export; 3D View > Sidebar > Collision / USUMStudio", "description": "Edit collision and source-linked object geometry for USUMStudio", "category": "Import-Export"}
 
 import json
 import math
@@ -36,7 +36,7 @@ def collision_material(name):
     material = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     material.diffuse_color = palette_color(int(match[2]))
     material.use_nodes = True
-    shader = material.node_tree.nodes.get("Principled BSDF")
+    shader = next((node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'), None)
     if shader:
         shader.inputs["Base Color"].default_value = material.diffuse_color
     return material
@@ -465,7 +465,7 @@ def import_object_file(path, context):
             if texture_path.is_file():
                 node = material.node_tree.nodes.new("ShaderNodeTexImage")
                 node.image = bpy.data.images.load(str(texture_path), check_existing=True)
-                shader = material.node_tree.nodes.get("Principled BSDF")
+                shader = next((node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'), None)
                 material.node_tree.links.new(node.outputs["Color"], shader.inputs["Base Color"])
                 material.node_tree.links.new(node.outputs["Alpha"], shader.inputs["Alpha"])
         if not faces:

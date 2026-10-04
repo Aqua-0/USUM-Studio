@@ -128,11 +128,12 @@ struct ModelDecoder {
                 mat.edge_alpha_mask = std::int32_t(u32(b, metadata + 108));
                 auto vertex_type = u32(b, metadata + 148);
                 mat.object_space_normals = vertex_type == 1 || vertex_type == 2;
+                mat.point_sprites = vertex_type == 4;
                 mat.height_tint = vertex_type == 8;
                 mat.screen_refraction = vertex_type == 16394;
                 mat.generated_lighting_color = vertex_type == 1 || vertex_type == 2 ||
                                                mat.height_tint || mat.screen_refraction;
-                if (mat.height_tint || mat.screen_refraction)
+                if (mat.height_tint || mat.screen_refraction || mat.point_sprites)
                     for (unsigned i = 0; i < 4; ++i) {
                         mat.vertex_parameters[i] = f32(b, metadata + 152 + i * 4);
                         require(std::isfinite(mat.vertex_parameters[i]),
@@ -186,6 +187,8 @@ struct ModelDecoder {
                 auto stream = slice(b, p + 32, command_size);
                 std::map<unsigned, std::uint32_t> registers;
                 for (auto c : commands(stream)) {
+                    if (c.reg == 0x107 && !mat.runtime_depth_state)
+                        mat.runtime_depth_state = c.value;
                     auto &value = registers[c.reg];
                     for (unsigned lane = 0; lane < 4; ++lane)
                         if (c.mask & (1 << lane)) {

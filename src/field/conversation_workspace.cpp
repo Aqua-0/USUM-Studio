@@ -92,6 +92,36 @@ actors(View placement, unsigned zone, InteractionTargetKind kind = InteractionTa
     }
     return result;
 }
+TrainerInteractionTarget trainer_interaction_target(const std::filesystem::path &source,
+                                                    ConversationActor actor) {
+    const auto catalog = load_map_catalog(source);
+    auto location = std::find_if(catalog.locations.begin(), catalog.locations.end(),
+                                [&](const auto &entry) { return entry.zone == int(actor.zone); });
+    require(location != catalog.locations.end(), "Trainer zone is missing");
+    auto ids = load_area_zone_ids(source, unsigned(location->area));
+    auto local = std::find_if(ids.begin(), ids.end(),
+                             [&](const auto &entry) { return entry.second == int(actor.zone); });
+    require(local != ids.end(), "Trainer local zone is missing");
+    auto placements = Archive(source / GameProfile::field_archive(source)).decoded(
+        unsigned(location->area) * TargetProfile::area_stride + TargetProfile::placement_slot);
+    auto rows = actors(placements, local->first, InteractionTargetKind::Trainer);
+    require(rows.contains(actor.event), "Trainer placement is missing");
+    auto groups = Container::parse(Container::parse(placements, "ED").files.at(
+        TargetProfile::trainer_placement_pack));
+    TrainerInteractionTarget target{actor.zone, actor.event, {}};
+    if (u32(groups.files.at(local->first), 4 + rows.at(actor.event).first * 84 + 56)) {
+        for (auto [slot, zone] : ids) {
+            if (slot != local->first) {
+                auto others = actors(placements, slot, InteractionTargetKind::Trainer);
+                require(!others.contains(actor.event) ||
+                            others.at(actor.event).second != rows.at(actor.event).second,
+                        "Another trainer in this area shares this event and trainer ID; resolve the duplicate before authoring");
+            }
+            target.zones.push_back(unsigned(zone));
+        }
+    }
+    return target;
+}
 }
 ConversationWorkspace::ConversationWorkspace(std::filesystem::path source, unsigned area)
     : source_(std::move(source)), area_(area) {
@@ -162,10 +192,7 @@ AuthoredInteraction &ConversationWorkspace::open(ConversationActor actor) {
                 .decoded(area * TargetProfile::area_stride + TargetProfile::placement_slot);
         auto rows = actors(placements, local->first, actor.kind);
         require(rows.contains(actor.event), "Trainer placement is missing");
-        auto ed = Container::parse(placements, "ED");
-        auto group = Container::parse(ed.files.at(TargetProfile::trainer_placement_pack));
-        require(u32(group.files.at(local->first), 4 + rows.at(actor.event).first * 84 + 56) == 0,
-                "Author shared alias trainers in their owning zone");
+        trainer_interaction_target(source_, actor);
         auto selector = rows.at(actor.event).second;
         require(selector > 1000 && selector < 3000,
                 "This trainer does not use the ordinary trainer dispatcher");
@@ -293,14 +320,39 @@ void ConversationWorkspace::validate_references(const ConversationDraft &draft) 
         return;
     std::function<void(const std::vector<ConversationStep> &)> visit = [&](const auto &steps) {
         for (const auto &step : steps) {
+            if (step.action == ConversationAction::IfPokemon) {
+                if (!species_count)
+                    species_count = decode_location_text(Archive(source_ / TargetProfile::location_text_archive)
+                        .decoded(TargetProfile::pokemon_names_member)).size();
+                require(step.species < *species_count,
+                        "Step " + std::to_string(step.id) + ": species is absent from the project Pokemon table");
+            }
+            if (step.action == ConversationAction::WarpPlayer) {
+                auto zones = Archive(source_ / TargetProfile::zone_archive).decoded(0);
+                require(zones.size() % 84 == 0 && step.warp_zone < zones.size() / 84,
+                        "Step " + std::to_string(step.id) + ": destination zone is absent from the project");
+            }
             if (step.action == ConversationAction::TrainerBattle)
                 load_trainer_battle(source_, step.trainer);
-            if (step.action == ConversationAction::GiveItem) {
+            if (step.action == ConversationAction::GiveItem || step.action == ConversationAction::TradeItems ||
+                step.action == ConversationAction::IfItem || step.action == ConversationAction::TakeItem ||
+                step.action == ConversationAction::BuyItem) {
                 if (!item_count)
                     item_count = load_pickup_item_names(source_).size();
                 require(step.item < *item_count && step.item < 1024,
                         "Step " + std::to_string(step.id) +
                             ": item ID is not supported by this project's item table or inventory");
+            }
+            if (step.action == ConversationAction::TradeItems)
+                require(item_count && step.requested_item < *item_count,
+                        "Requested item is absent from the project item table");
+            if (step.action == ConversationAction::GivePokemon || step.action == ConversationAction::TradePokemon) {
+                bool gift = step.action == ConversationAction::GivePokemon;
+                auto table = Archive(source_ / TargetProfile::script_events_archive)
+                                 .raw(gift ? TargetProfile::pokemon_gifts_member : TargetProfile::pokemon_trades_member);
+                unsigned stride = gift ? TargetProfile::pokemon_gift_record_size : TargetProfile::pokemon_trade_record_size;
+                require(table.size() % stride == 0 && (gift ? step.gift : step.trade) < table.size() / stride,
+                        "Step " + std::to_string(step.id) + ": Pokemon gift or trade record is absent from the project");
             }
             if (step.action == ConversationAction::Encounter) {
                 if (!encounter_count) {
@@ -329,7 +381,7 @@ PawnCompileResult ConversationWorkspace::compile(ConversationActor actor,
         if (area_ == trainer_workspace)
             link_authored_interaction(scripts_, result.program,
                                       interactions_.at(actor).target().script,
-                                      TrainerInteractionTarget{actor.zone, actor.event});
+                                      trainer_interaction_target(source_, actor));
         else {
             auto script = Container::parse(scripts_, "ZS");
             link_authored_interaction(script.files.at(actor.zone), result.program,
@@ -460,7 +512,7 @@ ConversationBuild ConversationWorkspace::build(ConversationBuildMode mode) const
                 validate_references(doc.draft());
             program =
                 link_authored_interaction(program, binaries_.at(actor).program, allocation.script,
-                                          TrainerInteractionTarget{actor.zone, actor.event})
+                                          trainer_interaction_target(source_, actor))
                     .program;
         }
         out.shared[trainer_source_.member] = std::move(program);

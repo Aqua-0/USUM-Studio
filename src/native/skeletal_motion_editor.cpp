@@ -1,4 +1,5 @@
 #include "native/motion_graph.h"
+#include "assets/motion_key_edit.h"
 #include "native/tutorial_widgets.h"
 #include "native/skeletal_motion_editor.h"
 #include <imgui.h>
@@ -9,7 +10,33 @@
 namespace studio {
 void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                                 EnvironmentRenderer &renderer, bool &playing, bool &repeat,
-                                int &bone, bool &show_bones) {
+                                int &bone, bool &show_bones, bool *show_weights) {
+    bool pose_pending;
+    {
+        std::lock_guard lock(pose_dialog_->mutex);
+        pose_pending = pose_dialog_->pending;
+        if (pose_dialog_->ready) {
+            pose_dialog_->ready = false;
+            try {
+                require(pose_dialog_->error.empty(), pose_dialog_->error);
+                if (!pose_dialog_->path.empty()) {
+                    auto path = std::filesystem::u8path(pose_dialog_->path);
+                    if (!pose_export_.empty()) {
+                        if (path.extension().empty())
+                            path += ".usum-pose";
+                        write_file_atomic(
+                            path, View(reinterpret_cast<const std::uint8_t *>(pose_export_.data()),
+                                       pose_export_.size()));
+                    } else
+                        poses_.push_back(parse_motion_pose(text(read_file(path))));
+                    error_.clear();
+                }
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+            pose_export_.clear();
+        }
+    }
     if (preview.area >= 0 ||
         (preview.scene->skeletons.empty() || preview.scene->skeletons[0].joints.empty())) {
         ImGui::TextWrapped("Open a Pokemon in Studio to edit its bone motions.");
@@ -26,6 +53,7 @@ void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
     if (identity_ != identity) {
         identity_ = identity;
         key_frame_ = 0;
+        editing_bone_ = editing_channel_ = -1;
         value_ = slope_ = 0;
         error_.clear();
     }
@@ -72,6 +100,26 @@ void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                 }
         ImGui::EndCombo();
     }
+    if (show_weights)
+        ImGui::Checkbox("Show selected bone weights", show_weights);
+    auto selected = tracks_.draw(motion, joints, identity, float(frame), bone, channel_, playing,
+                                 show_bones, show_weights);
+    if (selected.frame >= 0) {
+        frame = selected.frame;
+        scrub(frame);
+    }
+    if (selected.edited)
+        try {
+            doc.edit_skeletal_motion(index, *selected.edited);
+            preview = doc.model;
+            preview.select_motion(int(index), repeat);
+            renderer.set_scene(preview.scene);
+            renderer.playback.skeletal = true;
+            motion = preview.motions.at(index).skeletal;
+            error_.clear();
+        } catch (const std::exception &e) {
+            error_ = e.what();
+        }
     auto &joint = joints[bone];
     auto found = std::find_if(motion.tracks.begin(), motion.tracks.end(), [&](auto &t) {
         return t.name == joint.name;
@@ -94,6 +142,25 @@ void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                      : channel_ < 6 ? (track.axis_angle ? 0 : joint.rotation[channel_ - 3])
                                     : joint.translation[channel_ - 6];
     auto &curve = track.curves[channel_];
+    if (editing_bone_ != bone || editing_channel_ != channel_ || selected.frame >= 0) {
+        editing_bone_ = bone;
+        editing_channel_ = channel_;
+        key_frame_ = frame;
+        value_ = curve.sample(float(frame), fallback);
+        slope_ = 0;
+        for (const auto &key : curve.keys)
+            if (key.frame == frame) {
+                value_ = key.value;
+                slope_ = key.slope;
+                break;
+            }
+    }
+    if (selected.key >= 0 && std::size_t(selected.key) < curve.keys.size()) {
+        const auto &key = curve.keys[selected.key];
+        key_frame_ = int(key.frame);
+        value_ = key.value;
+        slope_ = key.slope;
+    }
     std::vector<MotionGraphKey> graph_keys;
     for (auto &key : curve.keys)
         graph_keys.push_back({key.frame, key.value});
@@ -195,6 +262,116 @@ void SkeletalMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
     ImGui::SameLine();
     if (studio::TutorialWidgets::Button("skeletal_motion_editor", "Remove bone track"))
         apply(true);
+    if (TutorialWidgets::CollapsingHeader("skeletal_motion_editor", "Multiple keys and timing")) {
+        ImGui::InputInt("First frame", &first_);
+        ImGui::InputInt("Last frame", &last_);
+        ImGui::TextWrapped("Inclusive range in this bone channel. Paste replaces keys at matching "
+                           "frames. Retiming rejects overlaps and fractional frames.");
+        auto edit_keys = [&](auto operation) {
+            try {
+                operation();
+                apply(false);
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+        };
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Copy key range"))
+            try {
+                clipboard_ = copy_motion_keys(curve, float(first_), float(last_));
+                error_.clear();
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu copied keys", clipboard_.size());
+        ImGui::InputInt("Paste at frame", &paste_frame_);
+        ImGui::BeginDisabled(clipboard_.empty());
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Paste key range"))
+            edit_keys([&] {
+                paste_motion_keys(curve, clipboard_, float(paste_frame_), motion.frames);
+            });
+        ImGui::EndDisabled();
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Delete key range"))
+            edit_keys([&] {
+                require(first_ >= 0 && last_ >= first_, "Choose a valid key range");
+                std::erase_if(curve.keys, [&](auto k) {
+                    return k.frame >= first_ && k.frame <= last_;
+                });
+            });
+        ImGui::InputInt("Shift frames", &offset_);
+        ImGui::InputFloat("Time scale", &time_scale_);
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Retime key range"))
+            edit_keys([&] {
+                retime_motion_keys(curve, float(first_), float(last_), float(offset_), time_scale_,
+                                   motion.frames);
+            });
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Flat tangents"))
+            edit_keys([&] {
+                set_motion_tangents(curve, float(first_), float(last_), MotionTangent::Flat);
+            });
+        ImGui::SameLine();
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Smooth tangents"))
+            edit_keys([&] {
+                set_motion_tangents(curve, float(first_), float(last_), MotionTangent::Smooth);
+            });
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Match next segment slope"))
+            edit_keys([&] {
+                set_motion_tangents(curve, float(first_), float(last_), MotionTangent::Linear);
+            });
+        ImGui::TextWrapped("The format stores one tangent per key. Matching the next segment slope "
+                           "does not make both neighboring segments linear.");
+    }
+    if (TutorialWidgets::CollapsingHeader("skeletal_motion_editor", "Pose shelf")) {
+        ImGui::TextWrapped(
+            "Capture all bones from the base motion at the current frame. Save poses to reuse them "
+            "in later sessions. Applying inserts keys at the current frame.");
+        ImGui::BeginDisabled(pose_pending);
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Load pose...")) {
+            pose_export_.clear();
+            choose_pose(nullptr, pose_dialog_, nullptr, false);
+        }
+        ImGui::EndDisabled();
+        ImGui::InputText("Pose name", pose_name_, sizeof(pose_name_));
+        if (TutorialWidgets::Button("skeletal_motion_editor", "Capture pose"))
+            try {
+                require(pose_name_[0], "Enter a pose name");
+                poses_.emplace_back(pose_name_, capture_motion_pose(motion, joints, float(frame)));
+                error_.clear();
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+        for (std::size_t i = 0; i < poses_.size(); ++i) {
+            ImGui::PushID(int(i));
+            ImGui::TextUnformatted(poses_[i].first.c_str());
+            ImGui::SameLine();
+            if (TutorialWidgets::Button("skeletal_motion_editor", "Apply pose"))
+                try {
+                    auto next = motion;
+                    paste_motion_pose(next, poses_[i].second, joints, float(frame));
+                    doc.edit_skeletal_motion(index, next);
+                    preview = doc.model;
+                    preview.select_motion(int(index), repeat);
+                    renderer.set_scene(preview.scene);
+                    renderer.playback.skeletal = true;
+                    error_.clear();
+                } catch (const std::exception &e) {
+                    error_ = e.what();
+                }
+            ImGui::BeginDisabled(pose_pending);
+            if (TutorialWidgets::Button("skeletal_motion_editor", "Save pose...")) {
+                pose_export_ = serialize_motion_pose(poses_[i].first, poses_[i].second);
+                choose_pose(nullptr, pose_dialog_, "pose.usum-pose", true);
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            bool remove = TutorialWidgets::Button("skeletal_motion_editor", "Remove pose");
+            ImGui::PopID();
+            if (remove) {
+                poses_.erase(poses_.begin() + std::ptrdiff_t(i));
+                break;
+            }
+        }
+    }
     if (preview.looping_overlay >= 0)
         ImGui::TextWrapped("A looping overlay is active. It can override this bone; disable "
                            "Looping effects in the viewport to inspect the base motion.");

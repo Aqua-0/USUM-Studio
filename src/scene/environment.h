@@ -37,7 +37,7 @@ struct SceneMaterial {
     int light_set = 0;
     bool fragment_lighting = true;
     bool generated_lighting_color = false, object_space_normals = false;
-    bool height_tint = false, screen_refraction = false;
+    bool height_tint = false, screen_refraction = false, point_sprites = false;
     MaterialColor vertex_parameters{};
     std::array<bool, 4> lighting_channels{};
     MaterialColor rim_phong{};
@@ -47,6 +47,7 @@ struct SceneMaterial {
     std::array<int, 3> reflection_tables{-1, -1, -1};
     std::array<MaterialColor, 3> reflection_inputs{};
     MaterialColor emission{}, ambient{1, 1, 1, 1}, diffuse{1, 1, 1, 1}, specular0{}, specular1{};
+    std::optional<std::uint32_t> runtime_depth_state;
     std::uint32_t depth_state = 0x1f51, blend_state = 0x01010000, blend_color = 0;
     std::uint32_t stencil_test = 0, stencil_operations = 0;
     bool stencil_write = true;

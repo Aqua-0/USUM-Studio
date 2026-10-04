@@ -30,6 +30,10 @@ class GeometryEditor {
     void apply(MaterialDocument &document, ModelDocument &preview, EnvironmentRenderer &renderer,
                const SkinnedModel &next);
     void display(ModelDocument &preview, EnvironmentRenderer &renderer, const SkinnedModel &model);
+    std::shared_ptr<MaterialDocument> mesh_clipboard_;
+    std::set<std::size_t> clipboard_meshes_, weight_sources_;
+    std::string transfer_status_, palette_status_;
+    float transfer_distance_ = 20;
     std::optional<SkinnedModel> model_;
     std::shared_ptr<const Environment> cached_scene_;
     std::string identity_, error_;

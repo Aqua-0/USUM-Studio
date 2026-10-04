@@ -578,7 +578,8 @@ void ProjectStore::save_settings() {
 void ProjectStore::capture(ProjectEdit edit, View data) {
     if (edit.kind == "authored-conversations")
         format_version = std::max(format_version, 5u);
-    if (edit.kind == "field-map" || edit.kind == "character-registration")
+    if (edit.kind == "field-map" || edit.kind == "character-registration" ||
+        edit.kind == "battle-model-addition")
         format_version = std::max(format_version, 3u);
     edit.blob = put(root, data);
     edits[edit.key] = std::move(edit);
@@ -683,9 +684,13 @@ ProjectBuildResult ProjectStore::stage(const ProjectBuild &build, const ProjectE
     require(std::count_if(build.edits.begin(), build.edits.end(), [](const auto &edit) {
                 return edit.kind == "character-registration";
             }) <= 1, "Stage and reload one character registration before adding another");
+    require(std::count_if(build.edits.begin(), build.edits.end(), [](const auto &edit) {
+                return edit.kind == "battle-model-addition";
+            }) <= 1, "Stage and reload one battle model addition before adding another");
     for (auto &edit : build.edits) {
         require(!edit.replay_staged, "Historical export context cannot stage a current edit");
         if (edit.kind == "field-map-created" || edit.kind == "character-registration-created" ||
+            edit.kind == "battle-model-added" ||
             (edit.kind == "asset-library" || edit.kind == "studio-asset"))
             continue;
         if (edit.kind == "composition" || edit.kind == "authored-conversations") {
@@ -800,7 +805,8 @@ ProjectBuildResult ProjectStore::stage(const ProjectBuild &build, const ProjectE
                                           ? changed_reference_members({original, entry.path()})
                                           : std::nullopt;
                     require(after.size() == before.size() ||
-                                ((edit.kind == "field-map" || edit.kind == "character-registration") &&
+                                ((edit.kind == "field-map" || edit.kind == "character-registration" ||
+                                  edit.kind == "battle-model-addition") &&
                                  after.size() > before.size()),
                             "Archive member-count changes require an explicit project adapter: " +
                                 name);
@@ -918,7 +924,8 @@ void ProjectStore::restore(std::size_t index) {
 void ProjectStore::reset(const std::string &key) {
     require(
         !edits.contains(key) || (edits.at(key).kind != "field-map-created" &&
-                                 edits.at(key).kind != "character-registration-created"),
+                                 edits.at(key).kind != "character-registration-created" &&
+                                 edits.at(key).kind != "battle-model-added"),
         "Created resources have dependencies. Restore a pre-creation history version instead.");
     auto old = edits;
     edits.erase(key);
@@ -958,10 +965,13 @@ void ProjectStore::advance() {
                 edit.kind = "field-map-created";
             else if (edit.kind == "character-registration")
                 edit.kind = "character-registration-created";
+            else if (edit.kind == "battle-model-addition")
+                edit.kind = "battle-model-added";
         std::erase_if(edits, [](const auto &e) {
             return e.second.kind != "composition" && e.second.kind != "authored-conversations" &&
                    e.second.kind != "field-map-created" &&
                    e.second.kind != "character-registration-created" &&
+                   e.second.kind != "battle-model-added" &&
                    e.second.kind != "asset-library" && e.second.kind != "studio-asset";
         });
         current_state = put(root, bytes(state_text()));
@@ -976,12 +986,18 @@ void ProjectStore::advance() {
 void ProjectStore::import_file(const std::filesystem::path &relative,
                                const std::filesystem::path &file, bool allow_append) {
     safe_relative(relative);
+    require(relative.generic_string() != TargetProfile::battle_trainers_archive ||
+                std::none_of(edits.begin(), edits.end(), [](const auto &entry) {
+                    return entry.second.kind == "battle-model-added";
+                }), "Added battle models depend on this archive layout. Restore project history "
+                    "to replace the archive; edit individual models in Studio.");
     require(std::all_of(edits.begin(), edits.end(),
                         [](const auto &e) {
                             return e.second.kind == "composition" ||
                                    (e.second.kind == "asset-library" || e.second.kind == "studio-asset") ||
                                    e.second.kind == "field-map-created" ||
-                                   e.second.kind == "character-registration-created";
+                                   e.second.kind == "character-registration-created" ||
+                                   e.second.kind == "battle-model-added";
                         }),
             "Stage and reload saved edits before changing project source archives");
     require(relative.generic_string() != TargetProfile::character_archive ||
@@ -1721,6 +1737,11 @@ void ProjectStore::reset_original(const ProjectChange &change) {
                     return entry.second.kind == "character-registration-created";
                 }), "Registered characters depend on this archive layout. Restore project history "
                     "to remove a registration; reset model edits in Studio.");
+    require(change.path != TargetProfile::battle_trainers_archive ||
+                std::none_of(edits.begin(), edits.end(), [](const auto &entry) {
+                    return entry.second.kind == "battle-model-added";
+                }), "Added battle models depend on this archive layout. Restore project history "
+                    "to remove additions; reset individual model edits in Studio.");
     Bytes data;
     if (change.member < 0)
         data = read_file(original / change.path);

@@ -337,6 +337,74 @@ void MaterialEditor::open(ModelDocument model) {
     effect_selection_ = -1;
     effect_preview_ = false;
 }
+void MaterialEditor::focus_material() {
+    material_page_ = 1;
+}
+void MaterialEditor::focus_texture(const std::string &name, MaterialSelection &selection) {
+    resource_texture_ = name;
+    auto bind = [&](int material) {
+        if (material < 0 || std::size_t(material) >= document_->edits().size())
+            return false;
+        for (unsigned unit = 0; unit < 3; ++unit)
+            if (document_->edits()[material].textures[unit].name == name) {
+                if (selection.material != material) {
+                    selection.draw = -1;
+                    selection.meshes.clear();
+                }
+                selection.material = material;
+                texture_unit_ = int(unit);
+                material_page_ = 1;
+                return true;
+            }
+        return false;
+    };
+    if (bind(selection.material))
+        return;
+    for (unsigned material = 0; material < document_->edits().size(); ++material)
+        if (bind(int(material)))
+            return;
+    material_page_ = 5;
+}
+void MaterialEditor::save_edits() {
+    try {
+        save();
+    } catch (const std::exception &e) {
+        message_ = e.what();
+    }
+}
+std::string MaterialEditor::workflow_status() const {
+    if (!document_)
+        return {};
+    std::string status = document_->dirty()     ? "Document: unsaved changes"
+                         : document_->changed() ? "Document: saved edits"
+                                                : "Document: unchanged";
+    if (auto *project = project_store()) {
+        status += project->unstaged() ? " | Project: saved changes await staging"
+                                      : " | Project: saved state staged";
+        if (document_->dirty())
+            status += " (excludes unsaved edits)";
+        static std::filesystem::path checked_root;
+        static std::string checked_overlay, export_status;
+        static double checked_at = -10;
+        double now = ImGui::GetTime();
+        if (checked_root != project->root || checked_overlay != project->current_overlay ||
+            now - checked_at > 1 || now < checked_at) {
+            checked_root = project->root;
+            checked_overlay = project->current_overlay;
+            checked_at = now;
+            try {
+                export_status = project->export_current()
+                                    ? " | Export: staged overlay exported"
+                                    : " | Export: staged overlay not exported";
+            } catch (const std::exception &) {
+                export_status = " | Export: status unavailable";
+            }
+        }
+        status += export_status;
+    } else if (file_.empty() && document_->changed())
+        status += " | No document file chosen";
+    return status;
+}
 void MaterialEditor::dialog(int kind) {
     if (kind == 1 && project_store())
         save_editor_project();
@@ -929,10 +997,12 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
     bool busy = dialog_kind_ || export_.valid() || texture_import_ || texture_encoding_.valid();
     ImGui::TextWrapped("%s%s", doc.model.name.c_str(), doc.dirty() ? " *" : "");
     draw_memory(false);
-    ImGui::TextDisabled("%s", doc.dirty()       ? "Unsaved document changes"
-                              : project_store() ? "No unsaved project edits"
-                              : file_.empty()   ? "Document not saved"
-                                                : "Document saved");
+    if (TutorialWidgets::Button("studio_resources", "Resources..."))
+        resource_request_ = 1;
+    ImGui::SameLine();
+    if (TutorialWidgets::Button("studio_resources", "Changes..."))
+        resource_request_ = 2;
+    ImGui::TextWrapped("%s", workflow_status().c_str());
     ImGui::BeginDisabled(busy);
     ImGui::BeginDisabled(!doc.can_undo());
     if (studio::TutorialWidgets::Button("material_editor", "Undo"))
@@ -1329,6 +1399,17 @@ void MaterialEditor::draw(EnvironmentRenderer &renderer, MaterialSelection &sele
                 edit.alpha_reference = unsigned(reference);
                 changed = true;
             }
+            int depth_test = (edit.depth & 1) ? 1 + int((edit.depth >> 4) & 7) : 0;
+            if (ImGui::Combo("Depth test", &depth_test,
+                             "Disabled\0Never\0Always\0Equal\0Not equal\0Less\0Less or equal\0Greater\0Greater or equal\0")) {
+                if (depth_test == 0)
+                    edit.depth &= ~1u;
+                else
+                    edit.depth = (edit.depth & ~0x71u) | 1u | (unsigned(depth_test - 1) << 4);
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Less or equal also draws pixels at the depth already stored by an earlier pass.");
             bool depth = (edit.depth & 0x1000) != 0;
             if (studio::TutorialWidgets::Checkbox("material_editor", "Write depth", &depth)) {
                 edit.depth = (edit.depth & ~0x1000u) | (depth ? 0x1000u : 0);

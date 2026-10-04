@@ -47,7 +47,7 @@ std::vector<PedestrianRoute> read_routes(View source) {
                     "Invalid pedestrian record");
             auto q = u32(b, p + 4);
             require(q >= end, "Pedestrian route overlaps records");
-            PedestrianRoute r{z, i, read_pedestrian_path(b, q), f32(b, p + 8), {}};
+            PedestrianRoute r{z, i, read_pedestrian_path(b, q), i, f32(b, p + 8), {}};
             auto c = u32(b, p + 12);
             if (c) {
                 require(c >= end, "Pedestrian choices overlap records");
@@ -178,8 +178,9 @@ PedestrianDocument::PedestrianDocument(Bytes source) : source_(std::move(source)
 void PedestrianDocument::set(unsigned i, PedestrianRoute r) {
     require(i < current_.size(), "Missing pedestrian route");
     require(r.zone == current_[i].zone && r.row == current_[i].row &&
-                r.choices.size() == current_[i].choices.size(),
+                r.source_row == current_[i].source_row,
             "Route identity changed");
+    require(r.choices.size() <= 4096, "Too many pedestrian choices");
     validate(r);
     if (r == current_[i])
         return;
@@ -196,23 +197,48 @@ void PedestrianDocument::redo() {
     if (can_redo())
         current_ = history_[++cursor_];
 }
+unsigned PedestrianDocument::duplicate(unsigned index, SpatialPoint offset) {
+    require(index < current_.size(), "Choose a route to copy");
+    auto route = current_[index];
+    route.row = 0;
+    for (auto &r : current_)
+        if (r.zone == route.zone)
+            route.row = std::max(route.row, r.row + 1);
+    require(route.row < 4096, "Too many pedestrian routes in this zone");
+    for (auto &p : route.path.points)
+        for (unsigned k = 0; k < 3; ++k)
+            p[k] += offset[k];
+    validate(route);
+    auto next = current_;
+    next.push_back(route);
+    std::sort(next.begin(), next.end(), [](auto &a, auto &b) {
+        return std::pair{a.zone, a.row} < std::pair{b.zone, b.row};
+    });
+    auto found = std::find(next.begin(), next.end(), route);
+    auto result = unsigned(found - next.begin());
+    current_ = std::move(next);
+    history_.resize(cursor_ + 1);
+    history_.push_back(current_);
+    ++cursor_;
+    return result;
+}
 std::string PedestrianDocument::serialize() const {
     std::ostringstream s;
-    s << std::setprecision(9) << "USUMSTUDIO_PEDESTRIANS 1\nsource " << hash_ << '\n';
-    for (unsigned i = 0; i < current_.size(); ++i)
-        if (current_[i] != original_[i]) {
-            auto &r = current_[i];
-            s << "route " << i << ' ' << r.cooldown << ' ' << r.path.curved << ' ' << r.path.loop
-              << ' ' << r.path.follow_ground << ' ' << r.path.points.size() << '\n';
-            for (auto p : r.path.points)
-                s << p[0] << ' ' << p[1] << ' ' << p[2] << '\n';
-            s << r.choices.size() << '\n';
-            for (auto c : r.choices) {
-                for (auto v : c)
-                    s << v << ' ';
-                s << '\n';
-            }
+    s << std::setprecision(9) << "USUMSTUDIO_PEDESTRIANS 2\nsource " << hash_ << '\n';
+    for (unsigned i = 0; i < current_.size(); ++i) {
+        auto &r = current_[i];
+        s << "route " << i << ' ' << r.zone << ' ' << r.row << ' ' << r.source_row << ' '
+          << r.cooldown << ' ' << r.path.curved << ' ' << r.path.loop << ' ' << r.path.follow_ground
+          << ' ' << r.path.points.size() << '\n';
+        for (auto p : r.path.points)
+            s << p[0] << ' ' << p[1] << ' ' << p[2] << '\n';
+        s << r.choices.size() << '\n';
+        for (auto c : r.choices) {
+            for (auto v : c)
+                s << v << ' ';
+            s << '\n';
         }
+    }
     s << "end\n";
     return s.str();
 }
@@ -220,11 +246,12 @@ void PedestrianDocument::restore(const std::string &patch) {
     std::istringstream s(patch);
     std::string word, hash;
     unsigned version;
-    require(bool(s >> word >> version) && word == "USUMSTUDIO_PEDESTRIANS" && version == 1,
+    require(bool(s >> word >> version) && word == "USUMSTUDIO_PEDESTRIANS" &&
+                (version == 1 || version == 2),
             "Unsupported pedestrian document");
     require(bool(s >> word >> hash) && word == "source" && hash == hash_,
             "Pedestrian source changed; reopen the matching project source");
-    auto next = original_;
+    auto next = version == 1 ? original_ : std::vector<PedestrianRoute>{};
     std::vector<bool> seen(next.size());
     bool end = false;
     while (s >> word) {
@@ -233,9 +260,27 @@ void PedestrianDocument::restore(const std::string &patch) {
             break;
         }
         unsigned i, n;
-        require(word == "route" && bool(s >> i) && i < next.size() && !seen[i],
-                "Invalid route index");
-        seen[i] = true;
+        require(word == "route" && bool(s >> i), "Invalid route index");
+        if (version == 2) {
+            require(i == next.size() && i < 65536, "Invalid route order");
+            PedestrianRoute route;
+            require(bool(s >> route.zone >> route.row >> route.source_row),
+                    "Missing route identity");
+            require(std::any_of(original_.begin(), original_.end(),
+                                [&](auto &r) {
+                                    return r.zone == route.zone && r.row == route.source_row;
+                                }),
+                    "Missing route template");
+            unsigned expected = 0;
+            for (auto &r : next)
+                if (r.zone == route.zone)
+                    ++expected;
+            require(route.row == expected, "Invalid route row");
+            next.push_back(route);
+        } else {
+            require(i < next.size() && !seen[i], "Invalid route index");
+            seen[i] = true;
+        }
         auto &r = next[i];
         require(
             bool(s >> r.cooldown >> r.path.curved >> r.path.loop >> r.path.follow_ground >> n) &&
@@ -244,7 +289,9 @@ void PedestrianDocument::restore(const std::string &patch) {
         r.path.points.resize(n);
         for (auto &p : r.path.points)
             require(bool(s >> p[0] >> p[1] >> p[2]), "Missing route position");
-        require(bool(s >> n) && n == r.choices.size(), "Pedestrian choice count changed");
+        require(bool(s >> n) && n <= 4096 && (version == 2 || n == r.choices.size()),
+                "Invalid pedestrian choice count");
+        r.choices.resize(n);
         for (auto &c : r.choices)
             for (auto &v : c)
                 require(bool(s >> v), "Missing pedestrian choice");
@@ -252,6 +299,13 @@ void PedestrianDocument::restore(const std::string &patch) {
     }
     s >> std::ws;
     require(end && s.eof(), "Incomplete pedestrian document");
+    for (auto &r : original_)
+        require(std::any_of(next.begin(), next.end(),
+                            [&](auto &entry) {
+                                return entry.zone == r.zone && entry.row == r.row &&
+                                       entry.source_row == r.row;
+                            }),
+                "Original route identity changed");
     current_ = std::move(next);
     history_ = {current_};
     cursor_ = 0;
@@ -265,14 +319,28 @@ Bytes PedestrianDocument::compile(View source) const {
                 sha256(ed.files[TargetProfile::pedestrian_placement_pack]) == hash_,
             "Pedestrian source changed during export");
     auto zones = Container::parse(ed.files[TargetProfile::pedestrian_placement_pack]);
-    for (unsigned i = 0; i < current_.size(); ++i)
-        if (current_[i] != original_[i]) {
-            auto &r = current_[i];
-            validate(r);
-            auto &b = zones.files.at(r.zone);
-            auto p = 4 + r.row * TargetProfile::pedestrian_record_size;
-            put_float(b, p + 8, r.cooldown);
-            if (r.path != original_[i].path) {
+    for (unsigned z = 0; z < zones.files.size(); ++z) {
+        auto original = zones.files[z];
+        if (original.empty())
+            continue;
+        unsigned count = 0;
+        for (auto &r : current_)
+            if (r.zone == z)
+                ++count;
+        unsigned old_count = u32(original, 0), size = TargetProfile::pedestrian_record_size;
+        auto tail = 4 + old_count * size;
+        require(count >= old_count, "Removing original routes is not supported");
+        Bytes b(4 + count * size);
+        put32(b, 0, count);
+        append(b, slice(original, tail, original.size() - tail));
+        for (auto &r : current_)
+            if (r.zone == z) {
+                validate(r);
+                require(r.source_row < old_count, "Missing pedestrian template");
+                unsigned p = 4 + r.row * size, old = 4 + r.source_row * size;
+                auto record = slice(original, old, size);
+                std::copy(record.begin(), record.end(), b.begin() + p);
+                put_float(b, p + 8, r.cooldown);
                 auto q = b.size();
                 b.resize(q + 8 + r.path.points.size() * 12);
                 put32(b, p + 4, narrow(q));
@@ -283,9 +351,7 @@ Bytes PedestrianDocument::compile(View source) const {
                 for (unsigned j = 0; j < r.path.points.size(); ++j)
                     for (unsigned k = 0; k < 3; ++k)
                         put_float(b, q + 8 + j * 12 + k * 4, r.path.points[j][k]);
-            }
-            if (r.choices != original_[i].choices) {
-                auto q = b.size();
+                q = b.size();
                 b.resize(q + 4 + r.choices.size() * 32);
                 put32(b, p + 12, narrow(q));
                 put32(b, q, narrow(r.choices.size()));
@@ -293,10 +359,14 @@ Bytes PedestrianDocument::compile(View source) const {
                     for (unsigned k = 0; k < 8; ++k)
                         put32(b, q + 4 + j * 32 + k * 4, r.choices[j][k]);
             }
-        }
+        zones.files[z] = std::move(b);
+    }
     ed.files[TargetProfile::pedestrian_placement_pack] = zones.write();
     auto result = ed.write();
-    require(read_routes(result) == current_, "Pedestrian writeback verification failed");
+    auto expected = current_;
+    for (auto &r : expected)
+        r.source_row = r.row;
+    require(read_routes(result) == expected, "Pedestrian writeback verification failed");
     return result;
 }
 void PedestrianDocument::export_to(const std::filesystem::path &dump,

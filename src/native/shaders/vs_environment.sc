@@ -30,7 +30,17 @@ void main() {
   normal=mul(u_model[0],vec4(normal,0.0)).xyz;
   tangent=mul(u_model[0],vec4(tangent,0.0)).xyz;
   if(u_skin.y< -0.5){vec3 eye=mul(u_invView,vec4(0.0,0.0,0.0,1.0)).xyz;position+=vec3(eye.x,u_skin.z,eye.z);}
-  if(u_vertexEffect.x>3.5){position.xz+=(position.y-u_vertexEffect.w)*u_vertexEffect.yz;position.y=u_vertexEffect.w+0.5;}
+  if(u_vertexEffect.x>3.5&&u_vertexEffect.x<4.5){position.xz+=(position.y-u_vertexEffect.w)*u_vertexEffect.yz;position.y=u_vertexEffect.w+0.5;}
+  if(u_vertexEffect.x>4.5){
+    vec3 center=mul(u_view,vec4(position,1.0)).xyz;
+    vec3 towardsEye=-center/max(length(center),0.000001);
+    vec3 right=cross(towardsEye,vec3(0.0,1.0,0.0));
+    vec3 up=cross(towardsEye,right);
+    float modelScale=min(length(u_model[0][0].xyz),min(length(u_model[0][1].xyz),length(u_model[0][2].xyz)));
+    float radius=3.0*a_color0.r*u_vertexEffect.y*modelScale;
+    center+=(right*(a_texcoord0.x*2.0-1.0)+up*(a_texcoord0.y*2.0-1.0))*radius;
+    position=mul(u_invView,vec4(center,1.0)).xyz;
+  }
   gl_Position = mul(u_viewProj, vec4(position, 1.0));
   if(u_skin.y< -0.5)gl_Position.z=gl_Position.w*0.99999;
   if(u_skin.y>0.5){gl_Position=vec4(position.xy*u_skin.zw,0.0,1.0);}
@@ -62,12 +72,15 @@ void main() {
     }
     v_color0=clamp(vec4(heightColor,back*u_vertexLighting.y,phong*u_vertexLighting.z,rim*u_vertexLighting.w),0.0,1.0);
   }
-  if(u_vertexEffect.x>3.5)v_color0=vec4(1.0);
+  if(u_vertexEffect.x>3.5&&u_vertexEffect.x<4.5)v_color0=vec4(1.0);
   v_texcoord0 = a_texcoord0;
   if(u_vertexEffect.x>1.5&&u_vertexEffect.x<3.5&&u_refresh.x<0.5){
     vec4 projected=mul(u_viewProj,vec4(position+normal*u_vertexEffect.y,1.0));
     v_texcoord0=projected.xy/max(projected.w,0.000001)*0.5+0.5;
     if(u_vertexEffect.x>2.5)v_texcoord0.y=1.0-v_texcoord0.y;
+  }
+  if(u_vertexEffect.x>4.5){
+    v_texcoord0=vec2(a_color0.a+(1.0-a_texcoord0.x)/max(u_vertexEffect.z,1.0),1.0-a_texcoord0.y);
   }
   v_texcoord1 = a_texcoord1;
   v_texcoord2 = a_texcoord2;

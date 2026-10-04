@@ -48,6 +48,49 @@ void VisibilityMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                 mesh_ = name;
         ImGui::EndCombo();
     }
+    auto commit = [&](const VisibilityMotion &next) {
+        std::vector<bool> visible;
+        for (unsigned i = 0; i < preview.scene->draws.size(); ++i)
+            visible.push_back(renderer.draw_visible(i));
+        doc.edit_visibility_motion(index, next);
+        preview = doc.model;
+        preview.select_motion(int(index), repeat);
+        renderer.set_scene(preview.scene);
+        for (unsigned i = 0; i < visible.size(); ++i)
+            renderer.set_draw_visible(i, visible[i]);
+        error_.clear();
+    };
+    std::vector<PropertyGraphTrack> graph_tracks;
+    for (auto &name : meshes) {
+        PropertyGraphTrack row;
+        row.name = name;
+        auto authored = std::find_if(motion.tracks.begin(), motion.tracks.end(), [&](auto &t) {
+            return t.mesh == name;
+        });
+        if (authored == motion.tracks.end() || authored->frames.empty())
+            row.steps.push_back({0, "Shown"});
+        else
+            for (unsigned f = 0; f < authored->frames.size(); ++f)
+                if (!f || authored->frames[f] != authored->frames[f - 1])
+                    row.steps.push_back({float(f), authored->frames[f] ? "Shown" : "Hidden"});
+        graph_tracks.push_back(std::move(row));
+    }
+    auto combined = tracks_.draw(graph_tracks, identity, clock.frames, float(frame), mesh_, true,
+                                 playing, error_);
+    if (combined.selected >= 0)
+        mesh_ = graph_tracks.at(combined.selected).name;
+    if (combined.frame >= 0) {
+        frame = combined.frame;
+        start_ = end_ = frame;
+        scrub(frame);
+    }
+    if (combined.action != PropertyGraphResult::Action::None)
+        try {
+            commit(edit_visibility_graph_range(motion, graph_tracks, combined));
+            motion = preview.motions.at(index).visibility;
+        } catch (const std::exception &e) {
+            error_ = e.what();
+        }
     auto found = std::find_if(motion.tracks.begin(), motion.tracks.end(), [&](auto &t) {
         return t.mesh == mesh_;
     });
@@ -119,16 +162,7 @@ void VisibilityMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                     next.tracks.insert(
                         next.tracks.begin() + std::distance(motion.tracks.begin(), found), track);
             }
-            std::vector<bool> visible;
-            for (unsigned i = 0; i < preview.scene->draws.size(); ++i)
-                visible.push_back(renderer.draw_visible(i));
-            doc.edit_visibility_motion(index, next);
-            preview = doc.model;
-            preview.select_motion(int(index), repeat);
-            renderer.set_scene(preview.scene);
-            for (unsigned i = 0; i < visible.size(); ++i)
-                renderer.set_draw_visible(i, visible[i]);
-            error_.clear();
+            commit(next);
         } catch (const std::exception &e) {
             error_ = e.what();
         }

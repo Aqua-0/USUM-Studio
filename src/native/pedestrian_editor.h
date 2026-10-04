@@ -21,6 +21,15 @@ class PedestrianEditor {
     }
     bool viewport(const float *view, const float *projection, ImVec2 origin, ImVec2 size,
                   bool hovered);
+    std::optional<std::pair<unsigned, unsigned>> selected_route() const {
+        if (!document_ || route_ < 0)
+            return {};
+        return std::pair{draft_.zone, draft_.row};
+    }
+    unsigned revision = 0;
+    Bytes compiled() const {
+        return document_ ? document_->compile() : Bytes{};
+    }
     bool active = false;
     SpatialRegion route_geometry() const;
     std::string copy_details() const;

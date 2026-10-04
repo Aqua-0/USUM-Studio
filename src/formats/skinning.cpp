@@ -1,3 +1,4 @@
+#include "formats/bone_palette.h"
 #include "formats/skinning.h"
 #include <algorithm>
 #include <cmath>
@@ -22,15 +23,6 @@ Matrix multiply(const Matrix &a, const Matrix &b) {
                 m[r * 4 + c] += a[r * 4 + k] * b[k * 4 + c];
     return m;
 }
-std::array<float, 3> transform(const Matrix &m, std::array<float, 3> v, bool point = true) {
-    std::array<float, 3> out{};
-    for (unsigned r = 0; r < 3; ++r) {
-        out[r] = point ? m[r * 4 + 3] : 0;
-        for (unsigned c = 0; c < 3; ++c)
-            out[r] += m[r * 4 + c] * v[c];
-    }
-    return out;
-}
 Matrix local(const Joint &j) {
     auto m = identity();
     for (unsigned axis = 0; axis < 3; ++axis) {
@@ -43,18 +35,29 @@ Matrix local(const Joint &j) {
         r[b * 4 + a] = s;
         m = multiply(r, m);
     }
-    for (unsigned i = 0; i < 3; ++i)
-        m[i * 4 + 3] = j.translation[i];
+    for (unsigned r = 0; r < 3; ++r) {
+        for (unsigned c = 0; c < 3; ++c)
+            m[r * 4 + c] *= j.scale[c];
+        m[r * 4 + 3] = j.translation[r];
+    }
     return m;
 }
 Matrix inverse(const Matrix &m) {
     auto out = identity();
+    float det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) +
+                m[2] * (m[4] * m[9] - m[5] * m[8]);
+    require(std::isfinite(det) && std::abs(det) > 1e-12f, "Singular skeletal transform");
+    out[0] = (m[5] * m[10] - m[6] * m[9]) / det;
+    out[1] = (m[2] * m[9] - m[1] * m[10]) / det;
+    out[2] = (m[1] * m[6] - m[2] * m[5]) / det;
+    out[4] = (m[6] * m[8] - m[4] * m[10]) / det;
+    out[5] = (m[0] * m[10] - m[2] * m[8]) / det;
+    out[6] = (m[2] * m[4] - m[0] * m[6]) / det;
+    out[8] = (m[4] * m[9] - m[5] * m[8]) / det;
+    out[9] = (m[1] * m[8] - m[0] * m[9]) / det;
+    out[10] = (m[0] * m[5] - m[1] * m[4]) / det;
     for (unsigned r = 0; r < 3; ++r)
-        for (unsigned c = 0; c < 3; ++c)
-            out[r * 4 + c] = m[c * 4 + r];
-    auto t = transform(out, {-m[3], -m[7], -m[11]}, false);
-    for (unsigned r = 0; r < 3; ++r)
-        out[r * 4 + 3] = t[r];
+        out[r * 4 + 3] = -out[r * 4] * m[3] - out[r * 4 + 1] * m[7] - out[r * 4 + 2] * m[11];
     return out;
 }
 float compact_float(std::uint32_t v) {
@@ -142,8 +145,6 @@ SkinnedModel SkinnedModel::parse(View bytes) {
                 pos += 4;
                 require(std::isfinite(value), "Non-finite joint transform");
             }
-        for (auto s : j.scale)
-            require(std::abs(s - 1) < 1e-5f, "Initial skinned profile requires unit joint scales");
         require((j.flags & 0xfc) == 0, "Billboard or unknown joint flags are unsupported");
         out.joints.push_back(j);
     }
@@ -204,7 +205,7 @@ SkinnedModel SkinnedModel::parse(View bytes) {
                 pos += 8 + length;
                 d.mesh.palette_offset = section.offset + pos;
                 auto palette_count = slice(b, pos, 32)[0];
-                require((mode == 0 || palette_count > 0) && palette_count <= 31,
+                require((mode == 0 || palette_count > 0) && palette_count <= bone_palette_capacity,
                         "Invalid bone palette size");
                 std::set<unsigned> used;
                 for (unsigned j = 0; j < palette_count; ++j) {

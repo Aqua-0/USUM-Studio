@@ -29,6 +29,7 @@ uniform vec4 u_constants[6];
 uniform vec4 u_bufferWrites[6];
 uniform vec4 u_buffer;
 uniform vec4 u_preview;
+uniform vec4 u_inspection;
 uniform vec4 u_texturePrecision;
 uniform vec4 u_projectionOptions;
 uniform vec4 u_cutaway;
@@ -145,8 +146,7 @@ void main() {
   vec4 tex2 = texture2DLod(s_tex2, textureCoordinates(uv2), materialLod(2,uv2));
   vec4 primary = mix(vec4(1.0), v_color0, u_preview.y);
   vec4 fragmentPrimary = vec4(1.0), fragmentSecondary = vec4(0.0);
-  if(u_lighting.w > 0.5 && u_gameLight.w > 0.5) {
-    vec3 normal = unitDirection(v_normal,vec3(0.0,1.0,0.0));
+  vec3 normal = unitDirection(v_normal,vec3(0.0,1.0,0.0));
     vec3 objectMapped=vec3(0.0,0.0,1.0);
     if(u_bump.x > 0.5) {
       vec3 tangent = v_tangent-normal*dot(normal,v_tangent);
@@ -160,6 +160,7 @@ void main() {
         normal = unitDirection(tangent*mapped.x+cross(normal,tangent)*mapped.y+normal*mapped.z,normal);
       }
     }
+  if(u_lighting.w > 0.5 && u_gameLight.w > 0.5) {
     vec3 light = unitDirection(u_lightDirection.xyz,vec3(0.0,1.0,0.0));
     vec3 eye = mul(u_invView,vec4(0.0,0.0,0.0,1.0)).xyz;
     vec3 view = unitDirection(eye-v_worldPosition,normal);
@@ -221,7 +222,11 @@ void main() {
       previous = color;
     }
   }
-  float test = u_preview.z, ref = u_preview.w;
+  bool nativeEdge = u_edgeOptions.x > 1.5;
+  bool ownColorEdge = nativeEdge && u_edgeOptions.y > 3.5 && u_edgeOptions.y < 4.5;
+  float test = nativeEdge && !ownColorEdge ? 1.0 : u_preview.z, ref = u_preview.w;
+  bool inspecting = u_inspection.x > 0.5 && u_pickColor.a < 0.5 && u_edgeOptions.x < 0.5;
+  if(!inspecting || u_inspection.w > 0.5) {
   if(test < 0.5) discard;
   if(test > 1.5 && test < 2.5 && abs(color.a-ref) > 0.001) discard;
   if(test > 2.5 && test < 3.5 && abs(color.a-ref) < 0.001) discard;
@@ -229,15 +234,44 @@ void main() {
   if(test > 4.5 && test < 5.5 && color.a > ref) discard;
   if(test > 5.5 && test < 6.5 && color.a <= ref) discard;
   if(test > 6.5 && color.a < ref) discard;
+  }
+  if(inspecting) {
+    float mode = u_inspection.x;
+    vec3 value = color.rgb;
+    if(mode < 2.5 && mode > 1.5) value = vec3(color.a);
+    else if(mode > 2.5 && mode < 3.5) {
+      vec4 sampleColor = u_inspection.y < 0.5 ? tex0 : u_inspection.y < 1.5 ? tex1 : tex2;
+      value = sampleColor.rgb;
+      if(u_inspection.z > 3.5) value = vec3(sampleColor.a);
+      else if(u_inspection.z > 2.5) value = vec3(sampleColor.b);
+      else if(u_inspection.z > 1.5) value = vec3(sampleColor.g);
+      else if(u_inspection.z > 0.5) value = vec3(sampleColor.r);
+    }
+    else if(mode > 3.5 && mode < 4.5) value = v_edgeColor.rgb;
+    else if(mode > 4.5 && mode < 5.5) value = vec3(v_edgeColor.a);
+    else if(mode > 5.5 && mode < 6.5) value = unitDirection(v_normal,vec3(0.0,1.0,0.0))*0.5+0.5;
+    else if(mode > 6.5 && mode < 7.5) value = normal*0.5+0.5;
+    else if(mode > 7.5 && mode < 8.5) value = unitDirection(v_tangent,vec3(1.0,0.0,0.0))*0.5+0.5;
+    else if(mode > 8.5 && mode < 9.5) {
+      vec2 uv = u_inspection.y < 0.5 ? v_texcoord0 : u_inspection.y < 1.5 ? v_texcoord1 : v_texcoord2;
+      float checker = mod(floor(uv.x*10.0)+floor(uv.y*10.0),2.0);
+      value = vec3(fract(uv),mix(0.2,0.8,checker));
+    }
+    else if(mode > 9.5 && mode < 10.5) value = fragmentPrimary.rgb;
+    else if(mode > 10.5) value = fragmentSecondary.rgb;
+    gl_FragColor = vec4(value,1.0);
+    return;
+  }
   if(u_pickColor.a > 1.5 && color.a <= 0.0) discard;
   if(u_edgeOptions.x>0.5){
+    if(ownColorEdge){gl_FragColor=color;return;}
     float mask=1.0;
     if(u_edgeOptions.w>=0.0){
       float slot=mod(u_edgeOptions.w,3.0);
       vec4 sampleColor=slot<0.5?tex0:slot<1.5?tex1:tex2;
       mask=u_edgeOptions.w<2.5?sampleColor.a:sampleColor.r;
     }
-    if(mask<0.5)discard;
+    if(nativeEdge ? mask<=0.0 : mask<0.5)discard;
     vec3 edgeNormal=vec3(0.5);
     if(u_edgeOptions.y<0.5 || u_edgeOptions.y>4.5)edgeNormal=unitDirection(v_normal,vec3(0.0,1.0,0.0))*0.5+0.5;
     else if(u_edgeOptions.y<1.5)edgeNormal=v_edgeColor.rgb;

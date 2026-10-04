@@ -1,10 +1,12 @@
 #pragma once
 #include "core/binary.h"
+#include <map>
 namespace studio {
 struct MapCreation {
     std::string name, source_identity;
-    unsigned template_zone = 0, template_area = 0, template_world = 0, template_terrain = 0;
-    unsigned zone = 0, area = 0, world = 0, terrain = 0;
+    unsigned template_zone = 0, template_area = 0, template_world = 0;
+    unsigned zone = 0, area = 0, world = 0;
+    std::map<unsigned, unsigned> terrain_resources;
     int entrance = -1;
     std::string serialize() const;
     static MapCreation parse(const std::string &);

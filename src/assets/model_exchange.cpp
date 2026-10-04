@@ -1,4 +1,5 @@
 #include "assets/model_exchange.h"
+#include "formats/bone_palette.h"
 #include "assets/skeleton_edit.h"
 #include "assets/model_resources.h"
 #include "core/digest.h"
@@ -233,7 +234,29 @@ Bytes replace_model_uvs(View original, unsigned channel, const MeshUvEdits &edit
     }
     return result;
 }
-Bytes replace_model_exchange(View original, const ModelExchange &replacement, bool keep_bones) {
+Bytes replace_model_exchange(View original, const ModelExchange &incoming, bool keep_bones) {
+    auto replacement = incoming;
+    replacement.meshes.clear();
+    for (std::size_t i = 0; i < incoming.meshes.size(); ++i) {
+        const auto &mesh = incoming.meshes[i];
+        if (mesh.influences)
+            for (const auto &v : mesh.vertices) quantize(v, incoming.joints.size());
+        auto draws = partition_bone_palettes(mesh.vertices.size(), mesh.indices, [&](unsigned v) {
+            std::set<unsigned> bones;
+            if (mesh.influences)
+                for (unsigned k = 0; k < 4; ++k)
+                    if (mesh.vertices[v].weights[k] > 0) bones.insert(mesh.vertices[v].joints[k]);
+            return bones;
+        });
+        for (auto &draw : draws) {
+            auto part = mesh;
+            part.source_mesh = mesh.source_mesh == std::size_t(-1) ? i : mesh.source_mesh;
+            part.vertices.clear();
+            for (auto v : draw.vertices) part.vertices.push_back(mesh.vertices[v]);
+            part.indices = std::move(draw.indices);
+            replacement.meshes.push_back(std::move(part));
+        }
+    }
     require(!replacement.standalone, "Assign game materials before importing a new model");
     auto before = decode_model_exchange(original);
     require(replacement.source == before.source,
@@ -301,13 +324,19 @@ Bytes replace_model_exchange(View original, const ModelExchange &replacement, bo
                         palette.push_back(bone);
                 }
                 palette.insert(palette.end(), needed.begin(), needed.end());
-                require(!palette.empty() && palette.size() <= 31,
-                        "A mesh can use at most 31 bones; split or reduce its influences");
+                require(!palette.empty() && palette.size() <= max_draw_bones,
+                        "Exported draws must use at most 20 bones");
+                changed |= data.descriptor[data.palette] > max_draw_bones;
                 data.descriptor[data.palette] = std::uint8_t(palette.size());
                 for (unsigned i = 0; i < palette.size(); ++i)
                     data.descriptor[data.palette + 1 + i] = std::uint8_t(palette[i]);
-            } else
+            } else {
                 require(needed.empty(), "This static mesh has no skinning channels");
+                if (data.descriptor[data.palette] > max_draw_bones) {
+                    data.descriptor[data.palette] = 0;
+                    changed = true;
+                }
+            }
             auto has = [&](unsigned semantic) {
                 return std::any_of(data.layout.attributes.begin(), data.layout.attributes.end(),
                                    [&](auto a) {

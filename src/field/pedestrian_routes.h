@@ -26,6 +26,7 @@ void append_route_geometry(SpatialRegion &region, const PedestrianPath &path);
 struct PedestrianRoute {
     unsigned zone = 0, row = 0;
     PedestrianPath path;
+    unsigned source_row = 0;
     float cooldown = 0;
     std::vector<std::array<unsigned, 8>> choices;
     bool operator==(const PedestrianRoute &) const = default;
@@ -37,6 +38,7 @@ class PedestrianDocument {
         return current_;
     }
     void set(unsigned index, PedestrianRoute route);
+    unsigned duplicate(unsigned index, SpatialPoint offset);
     void undo();
     void redo();
     bool can_undo() const {

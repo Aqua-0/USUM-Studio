@@ -31,13 +31,14 @@ void single(const Archive &archive, std::size_t member) {
 }
 std::string MapCreation::serialize() const {
     std::ostringstream out;
-    out << "USUM_MAP_CREATION 1\n"
+    out << "USUM_MAP_CREATION 2\n"
         << std::quoted(name) << '\n'
         << source_identity << '\n'
-        << template_zone << ' ' << template_area << ' ' << template_world << ' ' << template_terrain
-        << '\n'
-        << zone << ' ' << area << ' ' << world << ' ' << terrain << '\n'
-        << entrance << '\n';
+        << template_zone << ' ' << template_area << ' ' << template_world << '\n'
+        << zone << ' ' << area << ' ' << world << '\n'
+        << entrance << '\n' << terrain_resources.size() << '\n';
+    for (auto [original, cloned] : terrain_resources)
+        out << original << ' ' << cloned << '\n';
     return out.str();
 }
 MapCreation MapCreation::parse(const std::string &text) {
@@ -45,12 +46,32 @@ MapCreation MapCreation::parse(const std::string &text) {
     std::istringstream in(text);
     std::string tag;
     unsigned version;
-    require(bool(in >> tag >> version) && tag == "USUM_MAP_CREATION" && version == 1,
+    require(bool(in >> tag >> version) && tag == "USUM_MAP_CREATION" &&
+                (version == 1 || version == 2),
             "Unsupported map creation document");
     require(bool(in >> std::quoted(result.name) >> result.source_identity >> result.template_zone >>
-                 result.template_area >> result.template_world >> result.template_terrain >>
-                 result.zone >> result.area >> result.world >> result.terrain >> result.entrance),
+                 result.template_area >> result.template_world),
             "Incomplete map creation document");
+    unsigned original = 0, cloned = 0;
+    if (version == 1)
+        require(bool(in >> original), "Incomplete map creation document");
+    require(bool(in >> result.zone >> result.area >> result.world),
+            "Incomplete map creation document");
+    if (version == 1)
+        require(bool(in >> cloned), "Incomplete map creation document");
+    require(bool(in >> result.entrance), "Incomplete map creation document");
+    unsigned count = 1;
+    if (version == 2)
+        require(bool(in >> count) && count > 0 && count <= 65535,
+                "Invalid terrain resource count");
+    std::set<unsigned> destinations;
+    for (unsigned i = 0; i < count; ++i) {
+        if (version == 2)
+            require(bool(in >> original >> cloned), "Incomplete terrain resource mapping");
+        require(original < 65535 && cloned < 65535 &&
+                    result.terrain_resources.emplace(original, cloned).second &&
+                    destinations.insert(cloned).second, "Invalid terrain resource mapping");
+    }
     in >> std::ws;
     require(in.eof(), "Unexpected map creation data");
     return result;
@@ -81,7 +102,6 @@ MapCreation plan_map_creation(const std::filesystem::path &source, unsigned temp
     plan.zone = unsigned(count);
     plan.area = unsigned(fields.size() / TargetProfile::area_stride);
     plan.world = unsigned(worlds.size());
-    plan.terrain = unsigned(terrains.size());
     plan.entrance = entrance;
     auto zone = slice(metadata, template_zone * 84, 84);
     require(zone[31] == 0 && u16(zone, 10) == template_zone,
@@ -126,10 +146,15 @@ MapCreation plan_map_creation(const std::filesystem::path &source, unsigned temp
         if (member != 65535)
             resources.insert(member);
     }
-    require(resources.size() == 1, "Choose a template with one terrain resource");
-    plan.template_terrain = *resources.begin();
-    single(terrains, plan.template_terrain);
-    identity += sha256(terrains.raw(plan.template_terrain));
+    require(!resources.empty(), "Choose a template containing terrain resources");
+    require(terrains.size() + resources.size() <= 65535,
+            "Not enough terrain resource IDs to copy this template");
+    for (auto original : resources) {
+        single(terrains, original);
+        plan.terrain_resources.emplace(
+            original, unsigned(terrains.size() + plan.terrain_resources.size()));
+        identity += sha256(terrains.raw(original));
+    }
     WarpDocument warps(plan.template_area,
                        fields.decoded(plan.template_area * TargetProfile::area_stride +
                                       TargetProfile::placement_slot));
@@ -195,7 +220,7 @@ void export_map_creation(const std::filesystem::path &source, const MapCreation 
     for (std::size_t i = 0; i < cells; ++i) {
         auto at = 20 + i * TargetProfile::terrain_cell_size;
         if (u16(grid, at) != 65535)
-            put16(grid, at, std::uint16_t(plan.terrain));
+            put16(grid, at, std::uint16_t(plan.terrain_resources.at(u16(grid, at))));
     }
     field_members[{layout_member, 0}] = stored(original, preserve_container(layout));
     auto world_raw = worlds.raw(plan.template_world);
@@ -215,8 +240,10 @@ void export_map_creation(const std::filesystem::path &source, const MapCreation 
     fields.export_appended(output / GameProfile::field_archive(source), field_members);
     worlds.export_appended(output / TargetProfile::world_archive,
                            {{{plan.world, 0}, stored(world_raw, preserve_container(world))}});
-    terrains.export_appended(output / TargetProfile::terrain_archive,
-                             {{{plan.terrain, 0}, terrains.raw(plan.template_terrain)}});
+    std::map<std::pair<std::size_t, unsigned>, Bytes> terrain_members;
+    for (auto [original, cloned] : plan.terrain_resources)
+        terrain_members[{cloned, 0}] = terrains.raw(original);
+    terrains.export_appended(output / TargetProfile::terrain_archive, terrain_members);
     zones.export_to(output / TargetProfile::zone_archive,
                     {{0, stored(metadata_raw, metadata)}, {1, stored(mapping_raw, mapping)}});
 }

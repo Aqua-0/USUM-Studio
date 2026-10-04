@@ -1,11 +1,9 @@
 #include "assets/pokemon_catalog.h"
 #include "field/map_catalog.h"
 namespace studio {
-std::vector<PokemonEntry> decode_pokemon_catalog(View b, std::size_t members,
-                                                 const std::vector<std::string> &names) {
-    require(members > 1 && (members - 1) % TargetProfile::pokemon_stride == 0,
-            "Unsupported Pokemon archive layout");
-    auto data_count = (members - 1) / TargetProfile::pokemon_stride;
+namespace {
+std::vector<PokemonEntry> decode_catalog(View b, std::size_t data_count,
+                                       const std::vector<std::string> &names) {
     require(b.size() >= data_count * 2 && (b.size() - data_count * 2) % 4 == 0,
             "Invalid Pokemon management table");
     auto species_count = (b.size() - data_count * 2) / 4;
@@ -53,6 +51,24 @@ std::vector<PokemonEntry> decode_pokemon_catalog(View b, std::size_t members,
         }
     }
     return result;
+}
+}
+std::vector<PokemonEntry> decode_pokemon_catalog(View b, std::size_t members,
+                                                const std::vector<std::string> &names) {
+    require(members > 1, "Pokemon archive has no model resources");
+    std::string error = "Unsupported Pokemon archive layout";
+    for (auto extra : {0u, TargetProfile::pokemon_expanded_extra_members}) {
+        auto resources_per_variant = TargetProfile::pokemon_stride + extra;
+        if ((members - 1) % resources_per_variant)
+            continue;
+        try {
+            // Expanded archives keep the nine-member groups before the extra resources.
+            return decode_catalog(b, (members - 1) / resources_per_variant, names);
+        } catch (const std::exception &e) {
+            error = e.what();
+        }
+    }
+    throw std::runtime_error(error);
 }
 std::vector<PokemonEntry> load_pokemon_catalog(const std::filesystem::path &dump,
                                                const ArchiveSources &archives) {

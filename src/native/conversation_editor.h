@@ -4,11 +4,15 @@
 #include "native/script_sound_picker.h"
 #include "native/conversation_scene_tools.h"
 #include "native/preferences.h"
+#include "native/pokemon_record_editor.h"
 #include "scene/environment.h"
 #include <future>
 namespace studio {
 class ConversationEditor {
   public:
+    void compile_all(Preferences &preferences);
+    bool compiling() const { return compilation_.valid(); }
+    const std::optional<std::string> &compilation_result() const { return compilation_result_; }
     void global_controls(Preferences &preferences);
     void menu(Preferences &preferences);
     void clear_scene_preview() {
@@ -22,7 +26,7 @@ class ConversationEditor {
                   Preferences &preferences, EnvironmentRenderer &renderer, MapCursor &cursor);
 
   private:
-    void compile_all(Preferences &preferences);
+    std::optional<std::string> compilation_result_;
     void compiler_settings(Preferences &preferences);
     void load(unsigned area, ConversationActor actor);
     void select_actor(ConversationActor actor);
@@ -31,6 +35,7 @@ class ConversationEditor {
     void messages();
     unsigned message_language_ = GameProfile::dialogue_fallback_language;
     void preview();
+    PokemonRecordEditor record_editor_;
     ScriptSoundPicker sound_picker_;
     ConversationSceneTools scene_tools_;
     int preview_battle_result_ = -1;

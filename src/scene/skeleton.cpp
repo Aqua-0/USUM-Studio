@@ -125,6 +125,8 @@ SkeletalMotion decode_skeletal_motion(View b) {
 std::vector<Matrix> evaluate_skeleton(const SceneSkeleton &rig, double seconds, float hour,
                                       bool enabled) {
     auto count = rig.joints.size();
+    if (!enabled)
+        return std::vector<Matrix>(count, pose_identity());
     std::vector<Matrix> world(count), result(count);
     std::vector<unsigned> state(count);
     std::vector<std::array<float, 3>> scales(count);

@@ -1,6 +1,7 @@
 #include "formats/archive.h"
 #include "formats/compression.h"
 #include <algorithm>
+#include <array>
 #include <fstream>
 
 namespace studio {
@@ -118,7 +119,7 @@ Archive::Archive(const std::filesystem::path &requested) {
     require(image_header_ + 12 == data_offset_ &&
                 std::uint64_t(data_offset_) + u32(prefix_, image_header_ + 8) == u32(h, 20),
             "Invalid archive data extent");
-    std::uint32_t previous_end = 0;
+    std::vector<std::array<std::uint32_t, 3>> ranges;
     for (std::size_t i = 0; i < count; ++i) {
         auto record = fatb + 12 + u32(prefix_, fato + 12 + 4 * i);
         require(record >= fatb + 12 && record + 4 <= image_header_, "Archive entry exceeds table");
@@ -130,16 +131,21 @@ Archive::Archive(const std::filesystem::path &requested) {
                 require(record + 16 <= image_header_, "Archive subfile exceeds table");
                 ArchiveEntry e{u32(prefix_, record + 4), u32(prefix_, record + 8),
                                u32(prefix_, record + 12), record};
-                require(e.start >= previous_end && e.end >= e.start && e.size <= e.end - e.start,
+                require(e.end >= e.start && e.size <= e.end - e.start,
                         "Invalid archive member range");
                 require(std::uint64_t(data_offset_) + e.end <= u32(h, 20),
                         "Archive member exceeds file");
-                previous_end = e.end;
+                if (e.end > e.start)
+                    ranges.push_back({e.start, e.end, e.size});
                 entry[sub] = e;
                 record += 12;
             }
         entries_.push_back(std::move(entry));
     }
+    std::sort(ranges.begin(), ranges.end());
+    for (std::size_t i = 1; i < ranges.size(); ++i)
+        require(ranges[i] == ranges[i - 1] || ranges[i][0] >= ranges[i - 1][1],
+                "Archive members partially overlap");
     extend(entries_, overrides_);
     if (entries_.size() != count)
         prefix_ = metadata(prefix_, entries_, image_header_);

@@ -2,9 +2,11 @@
 #include "assets/model_document.h"
 #include "field/authored_interaction.h"
 #include "field/trainer_catalog.h"
+#include "field/map_catalog.h"
 #include "native/map_cursor.h"
 #include <future>
 namespace studio {
+class PokemonRecordEditor;
 class ConversationSceneTools {
   public:
     ~ConversationSceneTools() {
@@ -19,13 +21,23 @@ class ConversationSceneTools {
     bool actor(ConversationStep &step);
     bool motion(ConversationStep &step);
     bool destination(ConversationStep &step);
+    bool warp(ConversationStep &step);
     bool reward(ConversationStep &step);
+    bool pokemon_reward(ConversationStep &step);
+    bool pokemon_condition(ConversationStep &step);
     bool encounter(ConversationStep &step);
     bool trainer(ConversationStep &step);
     std::string text_token();
     void stop_motion();
+    void record_editor(PokemonRecordEditor &editor) { records_ = &editor; }
+    void refresh_records() { gift_records_.clear(); trade_records_.clear(); trainers_loaded_ = false; }
+
 
   private:
+    MapCatalog warp_catalog_;
+    bool warp_catalog_loaded_ = false;
+    char warp_filter_[100]{};
+    PokemonRecordEditor *records_ = nullptr;
     int region(int actor) const;
     std::string actor_name(int actor) const;
     void load_motion(int actor);
@@ -39,14 +51,14 @@ class ConversationSceneTools {
     std::future<std::vector<AssetMotion>> loading_;
     std::vector<AssetMotion> motions_;
     std::map<unsigned, SceneSkeleton> originals_;
-    std::vector<std::string> items_, encounters_, species_;
+    std::vector<std::string> items_, encounters_, species_, gift_records_, trade_records_;
     std::vector<TrainerBattleEntry> trainers_;
     bool trainers_loaded_ = false;
     char trainer_filter_[100]{}, word_filter_[100]{};
     int word_kind_ = 0, word_value_ = 1;
     std::string trainer_error_;
     bool items_loaded_ = false, encounters_loaded_ = false, drawn_ = false, discard_ = false;
-    char actor_filter_[100]{}, item_filter_[100]{}, encounter_filter_[100]{};
+    char actor_filter_[100]{}, item_filter_[100]{}, requested_item_filter_[100]{}, encounter_filter_[100]{}, reward_filter_[100]{};
     std::string motion_error_, item_error_, encounter_error_;
 };
 }

@@ -151,7 +151,7 @@ OverworldDocument::OverworldDocument(unsigned area, Bytes placements, Bytes char
                     require(!p || (p >= 4 + count * l.size && p < bytes.size()),
                             "Placement pointer is outside its data tail");
                 }
-                if (l.alias &&
+                if (kind != OverworldKind::Trainer && l.alias &&
                     (kind == OverworldKind::StaticObject ? u16(r, l.alias) : u32(r, l.alias)))
                     e.restriction = "Shared alias placements require editing their owning zone.";
                 if (kind == OverworldKind::Trainer) {

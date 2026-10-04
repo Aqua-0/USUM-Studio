@@ -30,10 +30,28 @@ enum class ConversationAction {
     IfBattleResult,
     TrainerBattle,
     Menu,
-    MenuOption
+    MenuOption,
+    GivePokemon,
+    TradePokemon,
+    TradeItems,
+    IfPokemon,
+    IfItem,
+    IfMoney,
+    GiveMoney,
+    TakeMoney,
+    TakeItem,
+    HealParty,
+    WarpPlayer,
+    ShowActor,
+    HideActor,
+    AddWork,
+    SubtractWork,
+    BuyItem
 };
 enum class ConversationComparison { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual };
 bool conversation_branch(ConversationAction action);
+bool conversation_work_action(ConversationAction action);
+bool conversation_work_id_valid(int id);
 const char *conversation_comparison(ConversationComparison comparison);
 bool conversation_compare(int actual, ConversationComparison comparison, int expected);
 struct ConversationStep {
@@ -47,6 +65,10 @@ struct ConversationStep {
     std::array<float, 3> destination{};
     float turn_threshold_degrees = 20;
     unsigned item = 1, quantity = 1, encounter = 0, trainer = 1;
+    unsigned gift = 0, trade = 0, requested_item = 2, requested_quantity = 1;
+    unsigned species = 1, money = 100;
+    bool include_boxes = false;
+    unsigned warp_zone = 0;
     bool wait_for_completion = false;
     ConversationComparison comparison = ConversationComparison::Equal;
     std::array<int, 3> arguments{0, 0, -1};

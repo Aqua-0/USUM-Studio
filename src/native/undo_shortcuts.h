@@ -12,13 +12,13 @@ inline std::set<std::string> blocked;
 inline void block(const char *history) {blocked.insert(history);}
 inline std::string canonical(const char *group) {
     std::string name(group);
-    if(name=="refresh_inspector" || name=="refresh_feeding_preview" || name=="texture_painter" || name=="lighting_table_editor") return "material_editor";
+    if(name=="pokemon_points" || name=="shading_inspection" || name=="studio_resources" || name=="property_tracks" || name=="refresh_inspector" || name=="refresh_feeding_preview" || name=="texture_painter" || name=="lighting_table_editor") return "material_editor";
     return name;
 }
 inline const char *window_name() {return ImGui::GetCurrentWindow()->RootWindow->Name;}
 inline void aliases(const std::string &group) {
     const auto offer=[&](std::initializer_list<const char *> windows){for(auto window:windows) routing.offer(window,group);};
-    if(group=="material_editor") offer({"Studio materials","Studio inspector","Studio viewport","Studio UVs","Studio animation","Texture painter","Material lighting tables","Animate mapping"});
+    if(group=="material_editor") offer({"Studio materials","Studio inspector","Studio viewport","Studio UVs","Studio animation","Texture painter","Material lighting tables","Animate mapping","Material track graph","Visibility track graph","Studio resources"});
     if(group=="map_authoring_workspace" || group=="existing_map_editor") offer({"Composition","Asset Library","Authoring tools","Authoring viewport","Authoring status"});
     if(group=="collision_editor") offer({"Collision viewport","Collision editing","Collision layers","Collision properties"});
     if(group=="camera_editor") offer({"Camera viewport","Camera editing","Camera regions"});

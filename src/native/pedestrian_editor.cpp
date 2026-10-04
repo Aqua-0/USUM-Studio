@@ -1,3 +1,4 @@
+#include "native/tutorial_widgets.h"
 #include "native/undo_shortcuts.h"
 #include "native/pedestrian_editor.h"
 #include <algorithm>
@@ -5,6 +6,7 @@
 #include <cstdio>
 #include <sstream>
 #include "field/area.h"
+#include "field/field_systems.h"
 #include "formats/container.h"
 namespace studio {
 void PedestrianEditor::set_scene(std::shared_ptr<Environment> scene, unsigned area,
@@ -79,18 +81,20 @@ void PedestrianEditor::select(unsigned zone, unsigned row) {
 void PedestrianEditor::synchronize() {
     if (!document_ || !scene_)
         return;
-    for (auto &region : scene_->spatial.regions) {
-        if (region.kind != SpatialKind::Pedestrian || !region.overworld)
-            continue;
-        for (auto &r : document_->routes())
-            if (r.zone == region.overworld->local_zone && r.row == region.overworld->row) {
-                region.vertices.clear();
-                region.lines.clear();
-                region.triangles.clear();
-                append_route_geometry(region, r.path);
-                break;
-            }
-    }
+    std::map<unsigned, int> zones;
+    for (auto &r : scene_->spatial.regions)
+        if (r.overworld && r.zone >= 0)
+            zones[r.overworld->local_zone] = r.zone;
+    std::erase_if(scene_->spatial.regions, [](auto &r) {
+        return r.kind == SpatialKind::Pedestrian;
+    });
+    SpatialScene decoded;
+    decode_field_system_regions(decoded, document_->compile(), zones);
+    for (auto &r : decoded.regions)
+        if (r.kind == SpatialKind::Pedestrian)
+            scene_->spatial.regions.push_back(std::move(r));
+    renderer_.spatial.selected = -1;
+    ++revision;
     renderer_.spatial.invalidate_geometry();
     renderer_.invalidate_selection_readback();
 }
@@ -113,6 +117,7 @@ void PedestrianEditor::apply() {
         error_.clear();
     } catch (const std::exception &e) {
         error_ = e.what();
+        route_ = std::min(route_, int(document_->routes().size()) - 1);
         draft_ = document_->routes()[route_];
         point_ = std::min(point_, int(draft_.path.points.size()) - 1);
     }
@@ -357,6 +362,7 @@ void PedestrianEditor::draw(ViewportCamera &camera) {
     ImGui::BeginDisabled(!document_->can_undo());
     if (studio::UndoShortcuts::button("pedestrian_editor", "Undo")) {
         document_->undo();
+        route_ = std::min(route_, int(document_->routes().size()) - 1);
         draft_ = document_->routes()[route_];
         point_ = std::min(point_, int(draft_.path.points.size()) - 1);
         synchronize();
@@ -366,11 +372,29 @@ void PedestrianEditor::draw(ViewportCamera &camera) {
     ImGui::BeginDisabled(!document_->can_redo());
     if (studio::UndoShortcuts::button("pedestrian_editor", "Redo")) {
         document_->redo();
+        route_ = std::min(route_, int(document_->routes().size()) - 1);
         draft_ = document_->routes()[route_];
         point_ = std::min(point_, int(draft_.path.points.size()) - 1);
         synchronize();
     }
     ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!project_store());
+    if (TutorialWidgets::Button("pedestrian_editor", "Create route from selected"))
+        try {
+            auto index = document_->duplicate(unsigned(route_), {100, 0, 0});
+            route_ = int(index);
+            draft_ = document_->routes()[index];
+            point_ = choice_ = 0;
+            detach_model();
+            synchronize();
+            reveal();
+            error_.clear();
+        } catch (const std::exception &e) {
+            error_ = e.what();
+        }
+    ImGui::TextWrapped("New routes copy this route's conditions and pedestrian choices, offset 100 "
+                       "units on X. Edit the points to place the route.");
     ImGui::EndDisabled();
     if (document_->dirty())
         ImGui::TextDisabled("Unsaved route edits");
@@ -453,6 +477,25 @@ void PedestrianEditor::draw(ViewportCamera &camera) {
             apply();
         ImGui::EndDisabled();
         ImGui::TextDisabled("A negative cooldown disables respawning.");
+        ImGui::BeginDisabled(!project_store());
+        if (TutorialWidgets::Button("pedestrian_editor", "Add pedestrian choice")) {
+            auto choice =
+                draft_.choices.empty()
+                    ? std::array<unsigned, 8>{0, 1, 0, 0, 0, 0, 0, 0}
+                    : draft_.choices[std::clamp(choice_, 0, int(draft_.choices.size()) - 1)];
+            draft_.choices.push_back(choice);
+            choice_ = int(draft_.choices.size()) - 1;
+            apply();
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(choice_ < 0 || std::size_t(choice_) >= draft_.choices.size());
+        if (TutorialWidgets::Button("pedestrian_editor", "Remove pedestrian choice")) {
+            draft_.choices.erase(draft_.choices.begin() + choice_);
+            choice_ = std::min(choice_, int(draft_.choices.size()) - 1);
+            apply();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
         if (draft_.choices.empty())
             ImGui::TextWrapped("This route has no pedestrian choices.");
         for (unsigned i = 0; i < draft_.choices.size(); ++i) {

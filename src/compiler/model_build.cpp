@@ -1,5 +1,6 @@
 #include "compiler/model_build.h"
 #include "compiler/asset.h"
+#include "formats/bone_palette.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -214,7 +215,64 @@ Bytes pack_resources(const std::vector<ModelResource> &resources) {
     require(checked.resources.size() == resources.size(), "Resource pack rebuild count mismatch");
     return out;
 }
-GeneratedSkin compile_asset(const ModelPack &donor, const AssetDocument &asset) {
+GeneratedSkin compile_asset(const ModelPack &donor, const AssetDocument &incoming) {
+    auto asset = incoming;
+    asset.meshes.clear();
+    std::set<std::string> names_in_use;
+    for (const auto &mesh : incoming.meshes) names_in_use.insert(mesh.name);
+    for (const auto &mesh : incoming.meshes) {
+        require(!mesh.palette.empty() && mesh.palette.size() <= 255,
+                "Invalid authored bone palette");
+        for (auto joint : mesh.palette)
+            require(joint < incoming.joints.size(), "Palette references a missing bone");
+        for (const auto &v : mesh.vertices) {
+            unsigned sum = 0;
+            for (unsigned k = 0; k < 4; ++k) {
+                sum += v.weights[k];
+                if (v.weights[k]) require(v.joints[k] < mesh.palette.size(),
+                                         "Vertex joint is outside palette");
+            }
+            require(sum == 255, "Vertex weights must sum to 255");
+        }
+        auto draws = partition_bone_palettes(mesh.vertices.size(), mesh.indices, [&](unsigned i) {
+            std::set<unsigned> bones;
+            const auto &v = mesh.vertices[i];
+            for (unsigned k = 0; k < 4; ++k)
+                if (v.weights[k]) bones.insert(mesh.palette[v.joints[k]]);
+            return bones;
+        });
+        if (draws.size() == 1 && mesh.palette.size() <= max_draw_bones) {
+            asset.meshes.push_back(mesh);
+            continue;
+        }
+        unsigned suffix = 1;
+        for (const auto &draw : draws) {
+            auto part = mesh;
+            if (draws.size() > 1) {
+                do { part.name = mesh.name + "_draw" + std::to_string(suffix++); }
+                while (!names_in_use.insert(part.name).second);
+            }
+            part.palette.clear();
+            part.vertices.clear();
+            part.indices = draw.indices;
+            for (auto index : draw.vertices) {
+                auto vertex = mesh.vertices[index];
+                for (unsigned k = 0; k < 4; ++k) {
+                    if (!vertex.weights[k]) { vertex.joints[k] = 0; continue; }
+                    auto bone = mesh.palette[vertex.joints[k]];
+                    auto found = std::find(part.palette.begin(), part.palette.end(), bone);
+                    if (found == part.palette.end()) {
+                        part.palette.push_back(bone);
+                        found = part.palette.end() - 1;
+                    }
+                    vertex.joints[k] = std::uint8_t(found - part.palette.begin());
+                }
+                part.vertices.push_back(vertex);
+            }
+            require(part.palette.size() <= max_draw_bones, "Exported palette exceeds 20 bones");
+            asset.meshes.push_back(std::move(part));
+        }
+    }
     require(!asset.meshes.empty() && !asset.materials.empty() && !asset.joints.empty(),
             "Empty imported asset");
     auto primary = std::find_if(donor.resources.begin(), donor.resources.end(), [](auto &r) {

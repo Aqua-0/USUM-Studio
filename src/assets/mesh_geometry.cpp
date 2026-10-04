@@ -1,4 +1,6 @@
 #include "assets/mesh_geometry.h"
+#include "assets/model_exchange.h"
+#include "formats/bone_palette.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -81,6 +83,43 @@ Bytes replace_mesh_geometry(View original, const SkinnedModel &replacement) {
                     a.rotation == b.rotation && a.translation == b.translation,
                 "Geometry editing does not change the skeleton bind pose");
     }
+    bool rebuild = false;
+    for (unsigned m = 0; m < source.meshes.size(); ++m) {
+        const auto &before = source.meshes[m];
+        const auto &after = replacement.meshes[m];
+        require(before.name == after.name && before.vertices.size() == after.vertices.size() &&
+                    before.indices == after.indices,
+                "Geometry editing preserves vertex counts and triangles");
+        std::set<unsigned> needed;
+        for (const auto &v : after.vertices)
+            for (unsigned k = 0; k < 4; ++k)
+                if (v.weights[k] > 0) needed.insert(v.joints[k]);
+        rebuild |= before.palette.size() > max_draw_bones || needed.size() > max_draw_bones;
+    }
+    if (rebuild) {
+        auto exchange = decode_model_exchange(original);
+        for (unsigned m = 0; m < source.meshes.size(); ++m)
+            for (unsigned i = 0; i < source.meshes[m].vertices.size(); ++i) {
+                const auto &a = source.meshes[m].vertices[i];
+                const auto &b = replacement.meshes[m].vertices[i];
+                finite(b.position);
+                finite(b.normal);
+                finite(b.tangent);
+                require(a.normal == b.normal || (a.normal_offset && a.normal_elements >= 3),
+                        "This mesh does not have an editable per-vertex normal");
+                require(a.tangent == b.tangent || (a.tangent_offset && a.tangent_elements >= 3),
+                        "This mesh does not have an editable per-vertex tangent");
+                auto &v = exchange.meshes[m].vertices[i];
+                for (unsigned k = 0; k < 3; ++k) {
+                    v.channels[0][k] = b.position[k];
+                    v.channels[1][k] = b.normal[k];
+                    v.channels[2][k] = b.tangent[k];
+                }
+                v.joints = b.joints;
+                v.weights = b.weights;
+            }
+        return replace_model_exchange(original, exchange);
+    }
     Bytes out(original.begin(), original.end());
     bool moved = false;
     std::map<std::size_t, std::pair<Point, Point>> bounds;
@@ -153,7 +192,7 @@ Bytes replace_mesh_geometry(View original, const SkinnedModel &replacement) {
                             "or attach at 100 percent");
                     auto it = std::find(palette.begin(), palette.end(), b.joints[k]);
                     if (it == palette.end()) {
-                        if (palette.size() < 31) {
+                        if (palette.size() < max_draw_bones) {
                             palette.push_back(std::uint8_t(b.joints[k]));
                             it = palette.end() - 1;
                         } else {
@@ -161,7 +200,7 @@ Bytes replace_mesh_geometry(View original, const SkinnedModel &replacement) {
                                 return !needed.contains(id);
                             });
                             require(it != palette.end(),
-                                    "The edited mesh needs more than 31 palette bones; remove an "
+                                    "The edited draw needs more than 20 palette bones; remove an "
                                     "unused attachment or choose an existing bone");
                             *it = std::uint8_t(b.joints[k]);
                         }
@@ -390,4 +429,121 @@ void rebuild_mesh_normals(SkinMesh &mesh) {
             vertex.normal[k] = n[k] / length * multiplier;
     }
 }
+WeightTransferResult
+transfer_surface_weights(SkinnedModel &model, const std::set<std::size_t> &sources,
+                         const std::map<std::size_t, std::set<std::size_t>> &targets,
+                         float max_distance) {
+    require(!sources.empty() && !targets.empty(), "Choose source surfaces and target vertices");
+    require(std::isfinite(max_distance) && max_distance > 0,
+            "Transfer distance must be greater than zero");
+    auto subtract = [](Point a, Point b) {
+        return Point{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+    };
+    auto dot = [](Point a, Point b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    struct Triangle {
+        const SkinVertex *v[3];
+    };
+    std::vector<Triangle> triangles;
+    for (auto mesh : sources) {
+        require(!targets.contains(mesh), "Source and target meshes must be different");
+        const auto &source = model.meshes.at(mesh);
+        require(source.influences > 0, "Source surfaces need bone weights");
+        for (std::size_t i = 0; i + 2 < source.indices.size(); i += 3)
+            triangles.push_back({{&source.vertices.at(source.indices[i]),
+                                  &source.vertices.at(source.indices[i + 1]),
+                                  &source.vertices.at(source.indices[i + 2])}});
+    }
+    require(!triangles.empty(), "Source surfaces have no triangles");
+    auto next = model;
+    WeightTransferResult result;
+    for (const auto &[mesh, vertices] : targets) {
+        auto &target = next.meshes.at(mesh);
+        require(target.influences > 0, "Target mesh has no skinning channels");
+        for (auto index : vertices) {
+            auto &v = target.vertices.at(index);
+            float best = max_distance * max_distance;
+            const Triangle *nearest = nullptr;
+            Point bary{};
+            for (const auto &t : triangles) {
+                auto a = t.v[0]->position, b = t.v[1]->position, c = t.v[2]->position;
+                auto ab = subtract(b, a), ac = subtract(c, a), ap = subtract(v.position, a);
+                auto d00 = dot(ab, ab), d01 = dot(ab, ac), d11 = dot(ac, ac);
+                auto d20 = dot(ap, ab), d21 = dot(ap, ac);
+                auto det = d00 * d11 - d01 * d01;
+                auto consider = [&](Point w) {
+                    Point p{};
+                    for (unsigned k = 0; k < 3; ++k)
+                        p[k] = a[k] * w[0] + b[k] * w[1] + c[k] * w[2];
+                    auto delta = subtract(v.position, p);
+                    auto distance = dot(delta, delta);
+                    if (distance <= best) {
+                        best = distance;
+                        nearest = &t;
+                        bary = w;
+                    }
+                };
+                if (det > 1e-12f * d00 * d11) {
+                    float y = (d11 * d20 - d01 * d21) / det, z = (d00 * d21 - d01 * d20) / det;
+                    if (y >= 0 && z >= 0 && y + z <= 1)
+                        consider({1 - y - z, y, z});
+                }
+                for (unsigned e = 0; e < 3; ++e) {
+                    unsigned end = (e + 1) % 3;
+                    auto edge = subtract(t.v[end]->position, t.v[e]->position);
+                    auto length = dot(edge, edge);
+                    float u =
+                        length > 0
+                            ? std::clamp(dot(subtract(v.position, t.v[e]->position), edge) / length,
+                                         0.f, 1.f)
+                            : 0;
+                    Point w{};
+                    w[e] = 1 - u;
+                    w[end] = u;
+                    consider(w);
+                }
+            }
+            if (!nearest) {
+                ++result.outside_distance;
+                continue;
+            }
+            std::map<unsigned, float> weights;
+            for (unsigned k = 0; k < 3; ++k)
+                for (unsigned j = 0; j < 4; ++j)
+                    weights[nearest->v[k]->joints[j]] += bary[k] * nearest->v[k]->weights[j];
+            std::vector<std::pair<unsigned, float>> ordered;
+            for (auto entry : weights)
+                if (entry.second > 0)
+                    ordered.push_back(entry);
+            std::sort(ordered.begin(), ordered.end(), [](auto a, auto b) {
+                return a.second != b.second ? a.second > b.second : a.first < b.first;
+            });
+            unsigned limit = std::min(4u, target.influences);
+            if (v.rigid)
+                limit = 1;
+            if (v.index_offset)
+                limit = std::min(limit, v.index_elements);
+            if (v.weight_offset)
+                limit = std::min(limit, v.weight_elements);
+            if (ordered.size() > limit)
+                ordered.resize(limit);
+            float total = 0;
+            for (auto entry : ordered)
+                total += entry.second;
+            require(total > 0, "Nearest surface has no usable bone weights");
+            v.joints = {};
+            v.weights = {};
+            for (unsigned k = 0; k < ordered.size(); ++k) {
+                v.joints[k] = std::uint16_t(ordered[k].first);
+                v.weights[k] = ordered[k].second / total;
+            }
+            ++result.transferred;
+        }
+    }
+    replace_mesh_geometry(model.model.original, next);
+    model = std::move(next);
+    return result;
+}
+
 }

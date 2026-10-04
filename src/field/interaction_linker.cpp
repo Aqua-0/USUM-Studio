@@ -176,9 +176,17 @@ InteractionLinkResult link_authored_interaction(View original, View compiled, un
         emit("push.c", {1});
         emit("sysreq.n", {std::int32_t(native("TrainerGetScrID")), 4});
         skip.push_back(emit("jnz", {0}));
-        emit("sysreq.n", {std::int32_t(native("PlayerGetZoneID")), 0});
-        emit("eq.c.pri", {std::int32_t(trainer->zone)});
-        skip.push_back(emit("jzer", {0}));
+        auto zones = trainer->zones;
+        if (zones.empty()) zones.push_back(trainer->zone);
+        std::vector<unsigned> matched;
+        for (auto zone : zones) {
+            emit("sysreq.n", {std::int32_t(native("PlayerGetZoneID")), 0});
+            emit("eq.c.pri", {std::int32_t(zone)});
+            matched.push_back(emit("jnz", {0}));
+        }
+        skip.push_back(emit("jump", {0}));
+        for (auto branch : matched)
+            code.at(branch / 4 + 1) = std::int32_t(code.size() * 4) - std::int32_t(branch);
         emit("push.c", {0});
         emit("sysreq.n", {std::int32_t(native("TrainerGetEventID")), 4});
         emit("eq.c.pri", {std::int32_t(trainer->event)});

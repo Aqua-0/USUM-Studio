@@ -88,7 +88,9 @@ void ModelExchangeEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                         renderer.set_scene(preview.scene);
                         message_ =
                             "Imported asset. Review geometry, materials and motions, then Save "
-                            "Project and Stage Project.";
+                            "Project and Stage Project. Prepared " +
+                            std::to_string(doc.model_exchange().meshes.size()) +
+                            " draws with at most 20 bones each.";
                     }
                 }
             }
@@ -143,7 +145,9 @@ void ModelExchangeEditor::draw(MaterialDocument &doc, ModelDocument &preview,
                     renderer.set_scene(preview.scene);
                     incoming_.reset();
                     message_ = "New model imported. Review materials and textures, then save and "
-                               "stage the project. Undo restores the previous model.";
+                               "stage the project. Undo restores the previous model. Prepared " +
+                               std::to_string(doc.model_exchange().meshes.size()) +
+                               " draws with at most 20 bones each.";
                     ImGui::CloseCurrentPopup();
                 } catch (const std::exception &e) {
                     message_ = e.what();

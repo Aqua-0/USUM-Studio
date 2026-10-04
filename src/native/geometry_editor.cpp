@@ -1,3 +1,4 @@
+#include "formats/bone_palette.h"
 #include "native/viewport_navigation.h"
 #include "native/tutorial_widgets.h"
 #include "native/geometry_editor.h"
@@ -118,6 +119,8 @@ void GeometryEditor::sync(MaterialDocument &doc, ModelDocument &preview) {
     auto previous = std::move(model_);
     model_.reset();
     if (!same) {
+        palette_status_.clear();
+        weight_sources_.clear();
         bone_ = 0;
         transfer_for_ = -1;
         test_bone_ = false;
@@ -150,6 +153,7 @@ void GeometryEditor::sync(MaterialDocument &doc, ModelDocument &preview) {
             for (unsigned i = 0; i < model_->meshes.size(); ++i)
                 topology_changed |= previous->meshes[i].indices != model_->meshes[i].indices;
         if (topology_changed) {
+            weight_sources_.clear();
             elements_.clear();
             selected_.clear();
             editable_.clear();
@@ -211,8 +215,19 @@ void GeometryEditor::apply(MaterialDocument &doc, ModelDocument &preview,
     test_source_.reset();
     auto selected_motion = preview.motion;
     std::vector<bool> visible;
-    for (unsigned i = 0; i < preview.scene->draws.size(); ++i)
+    for (unsigned i = 0; i < next.meshes.size(); ++i) {
+        const auto &mesh = next.meshes[i];
+        auto draws = partition_bone_palettes(mesh.vertices.size(), mesh.indices, [&](unsigned v) {
+            std::set<unsigned> bones;
+            for (unsigned k = 0; k < 4; ++k)
+                if (mesh.vertices[v].weights[k] > 0) bones.insert(mesh.vertices[v].joints[k]);
+            return bones;
+        });
+        visible.insert(visible.end(), draws.size(), renderer.draw_visible(i));
+    }
+    for (unsigned i = unsigned(next.meshes.size()); i < preview.scene->draws.size(); ++i)
         visible.push_back(renderer.draw_visible(i));
+    bool split = visible.size() != preview.scene->draws.size();
     doc.edit_geometry(next);
     preview = doc.model;
     preview.select_motion(selected_motion);
@@ -220,7 +235,18 @@ void GeometryEditor::apply(MaterialDocument &doc, ModelDocument &preview,
     for (unsigned i = 0; i < visible.size(); ++i)
         renderer.set_draw_visible(i, visible[i]);
     version_ = ~std::uint64_t(0);
+    if (split) {
+        elements_.clear();
+        selected_.clear();
+        weight_sources_.clear();
+        editable_.clear();
+    }
     sync(doc, preview);
+    if (split && model_) {
+        for (unsigned i = 0; i < model_->meshes.size(); ++i) editable_.insert(i);
+        palette_status_ = "Prepared " + std::to_string(model_->meshes.size()) +
+                          " draws with at most 20 bones each. Vertex selection was cleared.";
+    } else palette_status_.clear();
 }
 void GeometryEditor::material_panel(MaterialDocument &doc, ModelDocument &preview,
                                     EnvironmentRenderer &renderer, int &material) {
@@ -291,7 +317,8 @@ void GeometryEditor::panel(MaterialDocument &doc, ModelDocument &preview,
                            EnvironmentRenderer &renderer, bool &playing, int &material) {
     sync(doc, preview);
     if (doc.model.area >= 0 && !doc.model.project_asset)
-        ImGui::TextWrapped("Edits affect all placements using this model. Collision is edited separately.");
+        ImGui::TextWrapped(
+            "Edits affect all placements using this model. Collision is edited separately.");
     if (!model_) {
         ImGui::TextWrapped("%s", error_.c_str());
         return;
@@ -336,6 +363,67 @@ void GeometryEditor::panel(MaterialDocument &doc, ModelDocument &preview,
         }
         ImGui::EndCombo();
     }
+    if (ImGui::CollapsingHeader("Copy meshes between models")) {
+        ImGui::TextWrapped("Copy enabled meshes, open another Pokemon, then paste onto a bone.");
+        ImGui::BeginDisabled(!doc.model.is_pokemon() || doc.model.shadow_model ||
+                             editable_.empty());
+        if (ImGui::Button("Copy enabled meshes"))
+            try {
+                mesh_clipboard_ = std::make_shared<MaterialDocument>(doc.preview_model());
+                clipboard_meshes_ = editable_;
+                transfer_status_ = "Copied " + std::to_string(clipboard_meshes_.size()) + " meshes";
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+        ImGui::EndDisabled();
+        if (mesh_clipboard_) {
+            ImGui::Text("Clipboard: %zu meshes", clipboard_meshes_.size());
+            if (bone_ >= 0 &&
+                ImGui::BeginCombo("Attach to bone", model_->joints[bone_].name.c_str())) {
+                for (unsigned i = 0; i < model_->joints.size(); ++i)
+                    if (ImGui::Selectable(model_->joints[i].name.c_str(), bone_ == int(i)))
+                        bone_ = int(i);
+                ImGui::EndCombo();
+            }
+            ImGui::BeginDisabled(!doc.model.is_pokemon() || doc.model.shadow_model || bone_ < 0 ||
+                                 preview.motion >= 0);
+            if (ImGui::Button("Paste meshes"))
+                try {
+                    std::set<std::string> old_names;
+                    for (const auto &draw : preview.scene->draws)
+                        old_names.insert(draw.mesh);
+                    doc.copy_meshes(*mesh_clipboard_, clipboard_meshes_, unsigned(bone_));
+                    preview = doc.model;
+                    preview.select_motion(-1);
+                    playing = false;
+                    renderer.set_scene(preview.scene);
+                    version_ = ~std::uint64_t(0);
+                    sync(doc, preview);
+                    editable_.clear();
+                    for (unsigned i = 0; i < preview.scene->draws.size(); ++i)
+                        if (!old_names.contains(preview.scene->draws[i].mesh))
+                            editable_.insert(i);
+                    select_all(renderer);
+                    task_ = 0;
+                    transfer_status_ = "Pasted and selected. Position the meshes, then use Weights "
+                                       "to rebind them.";
+                } catch (const std::exception &e) {
+                    error_ = e.what();
+                }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Clear clipboard")) {
+                mesh_clipboard_.reset();
+                clipboard_meshes_.clear();
+            }
+            ImGui::TextWrapped("Includes materials, textures, shaders and material loops. Source "
+                               "skeletal and visibility motions are not copied.");
+        }
+    }
+    if (!palette_status_.empty())
+        ImGui::TextWrapped("%s", palette_status_.c_str());
+    if (!transfer_status_.empty())
+        ImGui::TextWrapped("%s", transfer_status_.c_str());
     studio::TutorialWidgets::RadioButton("geometry_editor", "Geometry", &task_, 0);
     ImGui::SameLine();
     ImGui::BeginDisabled(model_->joints.empty());
@@ -520,6 +608,42 @@ void GeometryEditor::panel(MaterialDocument &doc, ModelDocument &preview,
                 test_angle_ = 0;
             ImGui::TextWrapped(
                 "Temporary pose; not saved or exported. Turn off to paint. Includes child bones.");
+        }
+        if (ImGui::CollapsingHeader("Transfer weights from surface")) {
+            ImGui::TextWrapped(
+                "Choose source surfaces. Transfer affects selected vertices on other meshes.");
+            for (unsigned i = 0; i < model_->meshes.size(); ++i) {
+                if (preview.scene->materials[preview.scene->draws[i].material].point_sprites)
+                    continue;
+                bool source = weight_sources_.contains(i);
+                ImGui::PushID(int(i));
+                if (ImGui::Checkbox(model_->meshes[i].name.c_str(), &source)) {
+                    if (source)
+                        weight_sources_.insert(i);
+                    else
+                        weight_sources_.erase(i);
+                }
+                ImGui::PopID();
+            }
+            ImGui::InputFloat("Maximum distance", &transfer_distance_);
+            ImGui::BeginDisabled(selected_.empty() || weight_sources_.empty() ||
+                                 preview.motion >= 0 || test_bone_);
+            if (ImGui::Button("Transfer to selected vertices"))
+                try {
+                    auto next = *model_;
+                    auto result = transfer_surface_weights(next, weight_sources_, selected_,
+                                                           transfer_distance_);
+                    if (result.transferred)
+                        apply(doc, preview, renderer, next);
+                    transfer_status_ =
+                        std::to_string(result.transferred) + " vertices transferred; " +
+                        std::to_string(result.outside_distance) + " outside distance (unchanged)";
+                } catch (const std::exception &e) {
+                    error_ = e.what();
+                }
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("Weights are interpolated on the nearest triangle and reduced to "
+                               "the mesh's supported influences. Rigid meshes use one bone.");
         }
         ImGui::TextWrapped("Surface colors: blue = 0, green = half, red = full weight.");
         ImGui::SliderFloat("Target weight", &weight_, 0, 1, "%.3f");

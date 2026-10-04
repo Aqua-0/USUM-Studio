@@ -109,7 +109,7 @@ PlacementDocument::PlacementDocument(unsigned area, Bytes source)
                     for (auto v : e.source.position)
                         if (!std::isfinite(v) || std::abs(v) >= 1e7f)
                             e.restriction = "Invalid NPC position";
-                    if (u32(bytes, at + (trainer ? 56 : 104)))
+                    if (!trainer && u32(bytes, at + 104))
                         e.restriction = "Shared alias NPC: edit its owning zone instead";
                     for (unsigned field : {trainer ? 64u : 112u, trainer ? 68u : 116u}) {
                         const auto offset = u32(bytes, at + field);

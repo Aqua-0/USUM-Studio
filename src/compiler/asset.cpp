@@ -80,7 +80,7 @@ AssetDocument AssetDocument::read(View bytes) {
         require(names.insert(m.name).second, "Repeated mesh name");
         m.material = integer();
         require(m.material < materials, "Mesh material is missing");
-        auto palette = count(20);
+        auto palette = count(255);
         require(palette > 0, "Empty mesh palette");
         std::set<unsigned> used;
         for (unsigned k = 0; k < palette; ++k) {

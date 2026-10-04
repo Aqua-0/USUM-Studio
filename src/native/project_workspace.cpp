@@ -1,5 +1,6 @@
 #include "native/tutorial_widgets.h"
 #include "native/project_workspace.h"
+#include "native/conversation_editor.h"
 #include <imgui.h>
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -158,6 +159,13 @@ SourceProgress ProjectWorkspace::source_progress_callback() {
 }
 void ProjectWorkspace::update() {
     try {
+        if (preparing_export_ && conversations_->compilation_result()) {
+            preparing_export_ = false;
+            require(conversations_->compilation_result()->empty(),
+                    *conversations_->compilation_result());
+            stage();
+            export_after_stage_ = true;
+        }
         {
             std::lock_guard lock(picker_->mutex);
             if (picker_->ready) {
@@ -174,6 +182,7 @@ void ProjectWorkspace::update() {
                                                        edit.second.kind == "field-map-created" ||
                                                        edit.second.kind ==
                                                            "character-registration-created" ||
+                                                       edit.second.kind == "battle-model-added" ||
                                                        (edit.second.kind == "asset-library" ||
                                                         edit.second.kind == "studio-asset");
                                             }),
@@ -236,6 +245,14 @@ void ProjectWorkspace::update() {
             for (auto &note : result.notes)
                 notice_ += "\n" + note;
             staged_ = std::chrono::steady_clock::now();
+            if (export_after_stage_) {
+                export_after_stage_ = false;
+                save();
+                require(!store_->unstaged(),
+                        "Edits changed during the build. Build current changes again to include them.");
+                build_game_export();
+                return;
+            }
             for (auto &[key, edit] : store_->edits)
                 if (edit.kind == "field-map" && !store_->unstaged()) {
                     auto plan = MapCreation::parse(text(read_file(store_->document(key))));
@@ -278,10 +295,23 @@ void ProjectWorkspace::update() {
         }
     } catch (const std::exception &e) {
         reload_after_stage_ = false;
+        preparing_export_ = export_after_stage_ = false;
+        notice_.clear();
         manager_ = true;
         error_ = project_error(e);
         staged_ = std::chrono::steady_clock::now();
     }
+}
+void ProjectWorkspace::build_current_changes() {
+    require(store_.has_value(), "Open a project first");
+    require(!busy(), "Wait for the project operation to finish");
+    require(conversations_ && !conversations_->compiling(),
+            "Wait for conversation compilation to finish");
+    save();
+    conversations_->compile_all(preferences_);
+    preparing_export_ = true;
+    manager_ = true;
+    notice_ = "Compiling conversations before staging...";
 }
 void ProjectWorkspace::build_game_export() {
     if (!store_ || busy() || store_->current_overlay.empty())
@@ -330,8 +360,11 @@ void ProjectWorkspace::menu(int area) {
                 reload();
             if (studio::TutorialWidgets::MenuItem("project_workspace", "Open project folder"))
                 SDL_OpenURL(("file:///" + store_->root.generic_string()).c_str());
-            if (studio::TutorialWidgets::MenuItem("project_workspace", "Build game export",
-                                                  "Ctrl+Shift+B", false,
+            if (studio::TutorialWidgets::MenuItem("project_workspace", "Build current changes",
+                                                  "Ctrl+Shift+B", false, !busy()))
+                build_current_changes();
+            if (studio::TutorialWidgets::MenuItem("project_workspace", "Build staged export",
+                                                  nullptr, false,
                                                   !busy() && !store_->current_overlay.empty()))
                 build_game_export();
             if (studio::TutorialWidgets::MenuItem(
@@ -649,12 +682,15 @@ void ProjectWorkspace::draw_map_creation() {
                            "from the template. The project name does not change in-game text.");
         studio::TutorialWidgets::Checkbox("project_workspace",
                                           "Keep the template's existing behavior", &map_inherited_);
-        ImGui::TextWrapped("This version supports one zone per world and one terrain resource. New "
-                           "IDs require your corresponding executable changes for in-game use.");
+        ImGui::TextWrapped("This version supports one zone per world, without terrain variants or "
+                           "replacements. New IDs require your corresponding executable changes "
+                           "for in-game use.");
         if (map_plan_) {
             auto &plan = *map_plan_;
-            ImGui::Text("New field area %u | zone %u | world %u | terrain %u", plan.area, plan.zone,
-                        plan.world, plan.terrain);
+            ImGui::Text("New field area %u | zone %u | world %u", plan.area, plan.zone, plan.world);
+            ImGui::Text("Terrain resources to copy: %zu", plan.terrain_resources.size());
+            for (auto [original, cloned] : plan.terrain_resources)
+                ImGui::BulletText("Terrain resource %u -> %u", original, cloned);
         }
         if (store_->unstaged())
             ImGui::TextWrapped("Stage your current project changes before creating a map.");
@@ -708,7 +744,7 @@ void ProjectWorkspace::draw() {
             if (ImGui::IsKeyPressed(ImGuiKey_T, false))
                 stage();
             if (ImGui::IsKeyPressed(ImGuiKey_B, false))
-                build_game_export();
+                build_current_changes();
             if (ImGui::IsKeyPressed(ImGuiKey_R, false) && !busy() && !store_->unstaged())
                 reload();
         } catch (const std::exception &e) {
@@ -736,6 +772,7 @@ void ProjectWorkspace::draw() {
             } else {
                 ImGui::TextUnformatted(external_scan_.valid() || external_import_.valid()
                                            ? external_status_.c_str()
+                                       : preparing_export_ ? "Compiling conversations..."
                                        : export_.valid() ? "Building game export..."
                                                          : "Staging project...");
                 ImGui::ProgressBar(-float(ImGui::GetTime()) - 1.f, {320, 0}, "");
@@ -815,7 +852,8 @@ void ProjectWorkspace::draw() {
         ImGui::SetNextWindowSize({780, 550}, ImGuiCond_FirstUseEver);
         ImGui::Begin("Project changes", &manager_);
         ImGui::TextWrapped("%s", store_->root.string().c_str());
-        ImGui::TextUnformatted(export_.valid()      ? "Building game export..."
+        ImGui::TextUnformatted(preparing_export_ ? "Compiling conversations..."
+                               : export_.valid()      ? "Building game export..."
                                : stage_.valid()     ? "Staging..."
                                : store_->unstaged() ? "Saved changes are waiting to be staged"
                                                     : "Saved changes match the staged version");
@@ -826,10 +864,17 @@ void ProjectWorkspace::draw() {
             ImGui::BeginDisabled(busy());
             if (studio::TutorialWidgets::Button("project_workspace", "Stage Project"))
                 stage();
+            ImGui::SameLine();
+            if (studio::TutorialWidgets::Button("project_workspace", "Build current changes"))
+                build_current_changes();
             ImGui::EndDisabled();
-            ImGui::TextUnformatted(store_->export_current()
-                                       ? "Game export matches staged members"
-                                       : "Game export needs building after staging");
+            const auto &bindings = ProjectBinding::all();
+            const bool unsaved = std::any_of(bindings.begin(), bindings.end(),
+                                            [](const auto *binding) { return binding->pending(); });
+            if (unsaved) ImGui::TextUnformatted("Unsaved editor changes");
+            ImGui::TextUnformatted(!unsaved && !store_->unstaged() && store_->export_current()
+                                       ? "Game export is up to date"
+                                       : "Game export is out of date: build current changes");
             ImGui::TextWrapped("%s", notice_.empty() ? " " : notice_.c_str());
             if (!error_.empty())
                 ImGui::TextWrapped("%s", error_.c_str());
@@ -849,9 +894,10 @@ void ProjectWorkspace::draw() {
                     if (!selection_.empty() && store_->edits.contains(selection_)) {
                         ImGui::BeginDisabled(busy());
                         if (store_->edits.at(selection_).kind == "field-map-created" ||
-                            store_->edits.at(selection_).kind == "character-registration-created")
+                            store_->edits.at(selection_).kind == "character-registration-created" ||
+                            store_->edits.at(selection_).kind == "battle-model-added")
                             ImGui::TextWrapped(
-                                "Map creation record. To remove the map and its registrations "
+                                "Resource creation record. To remove it and its registrations "
                                 "together, restore a history version from before creation.");
                         else if (studio::TutorialWidgets::Button("project_workspace",
                                                                  "Reset this saved edit")) {

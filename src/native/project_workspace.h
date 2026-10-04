@@ -8,6 +8,7 @@
 #include <optional>
 #include <chrono>
 namespace studio {
+class ConversationEditor;
 class ProjectWorkspace {
   public:
     ProjectWorkspace(SDL_Window *, Preferences &, const std::string &directory, bool required);
@@ -20,9 +21,12 @@ class ProjectWorkspace {
         std::lock_guard lock(picker_->mutex);
         return busy() || picker_->pending;
     }
+    const std::string &error() const { return error_; }
     bool restarting() const {
         return restart_;
     }
+    void conversations(ConversationEditor &editor) { conversations_ = &editor; }
+    void build_current_changes();
     void stage_and_reload();
     void menu(int area);
     void draw();
@@ -30,6 +34,8 @@ class ProjectWorkspace {
     bool close();
 
   private:
+    ConversationEditor *conversations_ = nullptr;
+    bool preparing_export_ = false, export_after_stage_ = false;
     struct SourceVerificationProgress {
         std::mutex mutex;
         std::size_t completed = 0, total = 0;
@@ -62,7 +68,7 @@ class ProjectWorkspace {
     std::future<ProjectBuildResult> stage_;
     std::future<void> export_;
     bool busy() const {
-        return stage_.valid() || export_.valid() || external_scan_.valid() ||
+        return preparing_export_ || stage_.valid() || export_.valid() || external_scan_.valid() ||
                external_import_.valid() || source_task_.valid();
     }
     std::shared_ptr<FolderSelection> picker_ = std::make_shared<FolderSelection>();

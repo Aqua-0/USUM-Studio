@@ -1,4 +1,5 @@
 #include "assets/character_registration.h"
+#include "assets/battle_model_addition.h"
 #include "assets/battle_effects.h"
 #include "native/project_binding.h"
 #include "field/map_creation.h"
@@ -16,6 +17,8 @@
 #include "field/interaction_source.h"
 #include "field/conversation_workspace.h"
 #include "field/pedestrian_routes.h"
+#include "field/field_activity_document.h"
+#include "field/pokemon_record.h"
 #include "formats/container.h"
 #include "field/pickup_document.h"
 #include "field/overworld_document.h"
@@ -270,6 +273,12 @@ void export_project_edit(const ProjectEdit &e, const std::filesystem::path &sour
     auto patch = text(read_file(file));
     std::istringstream args(e.parameters);
     unsigned area = 0;
+    if (e.kind == "battle-model-addition") {
+        export_battle_model_addition(Archive(source / TargetProfile::battle_trainers_archive),
+                                    BattleModelAddition::parse(patch),
+                                    output / TargetProfile::battle_trainers_archive);
+        return;
+    }
     if (e.kind == "character-registration") {
         auto data = read_file(file);
         patch.assign(data.begin(), data.end());
@@ -283,6 +292,7 @@ void export_project_edit(const ProjectEdit &e, const std::filesystem::path &sour
         return;
     }
     if (e.kind == "field-map-created" || e.kind == "character-registration-created" ||
+        e.kind == "battle-model-added" ||
         (e.kind == "asset-library" || e.kind == "studio-asset"))
         return;
     if (e.kind == "material" || e.kind == "pokemon-settings") {
@@ -387,6 +397,14 @@ void export_project_edit(const ProjectEdit &e, const std::filesystem::path &sour
             std::filesystem::create_directories(path.parent_path());
             doc.export_archive(source / TargetProfile::pokemon_archive, path);
         }
+        return;
+    }
+    if (e.kind == "field-activities") {
+        require(bool(args >> area), "Invalid field activity area");
+        Archive field(source / GameProfile::field_archive(source));
+        FieldActivityDocument doc(field.decoded(area * TargetProfile::area_stride + TargetProfile::placement_slot));
+        doc.restore(patch);
+        doc.export_to(source, output, area);
         return;
     }
     if (e.kind == "pedestrians") {
@@ -564,6 +582,14 @@ void export_project_edit(const ProjectEdit &e, const std::filesystem::path &sour
         auto path = output / ClothingProfile::colors[profile];
         std::filesystem::create_directories(path.parent_path());
         palette.export_archive(path);
+        return;
+    }
+    if (e.kind == "pokemon-record") {
+        unsigned kind, row;
+        require(bool(args >> kind >> row) && kind <= unsigned(PokemonRecordKind::Trainer), "Invalid Pokemon record source");
+        auto document = PokemonRecordDocument::load(source, PokemonRecordKind(kind), row);
+        document.restore(patch);
+        document.export_to(source, output);
         return;
     }
     if (e.kind == "original-archive") {

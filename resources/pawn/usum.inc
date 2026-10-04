@@ -278,3 +278,217 @@ stock SetMessageNumber(slot, value)
 {
     WordSetNumber(slot, value, 0, 0);
 }
+
+native ItemGetNum(item);
+native ItemSub(item, quantity);
+native PokePartyGetCount(mode);
+native BoxIsFull();
+native PokemonAdd(gift, argument_2, argument_3, argument_4, argument_5, argument_6);
+native FadeOut_(argument_1, frames, argument_3, argument_4);
+native FieldClose_(argument_1, argument_2);
+native FieldOpen_(argument_1, argument_2);
+native FieldTradeExcelLoad();
+native FieldTradeExcelIsLoaded();
+native FieldTradeExcelGetParam(trade, parameter);
+native FieldTradeExcelEnd();
+native CallBoxFieldTrade(species, sex);
+native GetSelectMonsIsEgg(selection_1, selection_2);
+native GetSelectMonsNo(selection_1, selection_2);
+native GetSelectMonsSex(selection_1, selection_2);
+native GetSelectMonsSeikaku(selection_1, selection_2);
+native GetSelectMonsPlace(selection_1, selection_2);
+native GetSelectMonsIsCapture(selection_1, selection_2);
+native GetSelectMonsWazaNum(selection_1, selection_2);
+native GetSelectMonsWaza(selection_1, selection_2, slot);
+native PokeTradeLoad();
+native PokeTradeIsLoaded(selection_1, selection_2, trade);
+native PokeTradeExec();
+native PokeTradeFin();
+
+stock TradeItems(requested_item, requested_quantity, offered_item, offered_quantity)
+{
+    if (requested_item <= 0 || requested_item >= 1024 || offered_item <= 0 || offered_item >= 1024 ||
+        requested_item == offered_item || requested_quantity < 1 || requested_quantity > 999 ||
+        offered_quantity < 1 || offered_quantity > 999) return 0;
+    if (ItemGetNum(requested_item) < requested_quantity) return 0;
+    if (!ItemSub(requested_item, requested_quantity)) return 0;
+    if (ItemAddCheck(offered_item, offered_quantity) && ItemAdd(offered_item, offered_quantity)) return 1;
+    // No yield occurs between removal and refund.
+    ItemAdd(requested_item, requested_quantity);
+    return 0;
+}
+
+stock GivePokemon(gift)
+{
+    if (gift < 0 || (PokePartyGetCount(0) >= 6 && BoxIsFull())) return 0;
+    FadeOut_(0, 8, 2, 0);
+    while (!FadeWait_()) WaitFrames(1);
+    PokemonAdd(gift, 0, -1, 0, 2, 1);
+    return 1;
+}
+
+stock CloseTradeField()
+{
+    FadeOut_(0, 20, 2, 0);
+    while (!FadeWait_()) WaitFrames(1);
+    FieldClose_(0, 0);
+}
+
+stock OpenTradeField()
+{
+    FieldOpen_(0, 0);
+    FadeIn_(20, 2, 0);
+    while (!FadeWait_()) WaitFrames(1);
+}
+
+stock TradePokemon(trade)
+{
+    if (trade < 0 || PokePartyGetCount(2) < 2) return 0;
+    FieldTradeExcelLoad();
+    while (!FieldTradeExcelIsLoaded()) WaitFrames(1);
+    new species = FieldTradeExcelGetParam(trade, 29);
+    new sex = FieldTradeExcelGetParam(trade, 30);
+    new nature = FieldTradeExcelGetParam(trade, 31);
+    new place = FieldTradeExcelGetParam(trade, 32);
+    new move = FieldTradeExcelGetParam(trade, 33);
+    FieldTradeExcelEnd();
+    CloseTradeField();
+    CallBoxFieldTrade(species, sex);
+    new selection_result = WorkGet(32780);
+    new selection_1 = WorkGet(32781), selection_2 = WorkGet(32782);
+    OpenTradeField();
+    if (selection_result == 254) return 0;
+    if (GetSelectMonsIsEgg(selection_1, selection_2)) return 0;
+    if (species > 0 && GetSelectMonsNo(selection_1, selection_2) != species) return 0;
+    if (sex > 0 && sex < 3 && GetSelectMonsSex(selection_1, selection_2) != sex) return 0;
+    if (nature > 0 && nature < 255 && GetSelectMonsSeikaku(selection_1, selection_2) != nature) return 0;
+    if (place >= 0 && GetSelectMonsPlace(selection_1, selection_2) != place &&
+        GetSelectMonsIsCapture(selection_1, selection_2)) return 0;
+    if (move >= 0) {
+        new found = 0;
+        for (new slot = 0; slot < GetSelectMonsWazaNum(selection_1, selection_2); slot++) {
+            if (move == 0 || GetSelectMonsWaza(selection_1, selection_2, slot) == move) found = 1;
+        }
+        if (!found) return 0;
+    }
+    PokeTradeLoad();
+    while (!PokeTradeIsLoaded(selection_1, selection_2, trade)) WaitFrames(1);
+    CloseTradeField();
+    PokeTradeExec();
+    OpenTradeField();
+    PokeTradeFin();
+    return 1;
+}
+
+native PokePartyGetParam(slot, parameter, argument);
+native BoxMonsNoExists(species, include_eggs);
+native PlayerGetMoney();
+native PlayerAddMoney(amount);
+native PlayerSubMoney(amount);
+
+#define PARTY_PARAM_SPECIES 0
+#define PARTY_PARAM_IS_EGG 8
+#define WALLET_LIMIT 9999999
+
+stock HasPokemon(species, include_boxes = 0)
+{
+    if (species <= 0 || species > 65535) return 0;
+    new count = PokePartyGetCount(0);
+    for (new slot = 0; slot < count; ++slot) {
+        if (PokePartyGetParam(slot, PARTY_PARAM_IS_EGG, 0)) continue;
+        if (PokePartyGetParam(slot, PARTY_PARAM_SPECIES, 0) == species) return 1;
+    }
+    if (include_boxes) return BoxMonsNoExists(species, 0);
+    return 0;
+}
+
+stock HasItem(item, quantity = 1)
+{
+    if (item <= 0 || item >= 1024 || quantity <= 0 || quantity > 999) return 0;
+    return ItemGetNum(item) >= quantity;
+}
+
+stock TakeItem(item, quantity)
+{
+    if (!HasItem(item, quantity)) return 0;
+    return ItemSub(item, quantity);
+}
+
+stock GiveMoney(amount)
+{
+    if (amount <= 0 || amount > WALLET_LIMIT) return 0;
+    if (PlayerGetMoney() > WALLET_LIMIT - amount) return 0;
+    PlayerAddMoney(amount);
+    return 1;
+}
+
+stock TakeMoney(amount)
+{
+    if (amount <= 0 || amount > WALLET_LIMIT) return 0;
+    if (PlayerGetMoney() < amount) return 0;
+    PlayerSubMoney(amount);
+    return 1;
+}
+
+
+native PokePartyRecoverAll();
+native ChrDisp(actor, visible);
+native MapChangeCore_(zone, x_bits, y_bits, z_bits, force_end, fade,
+                      keep_music, show_location, fixed_position, update_event_time);
+
+stock HealParty()
+{
+    PokePartyRecoverAll();
+}
+
+stock ShowActor(actor = ACTOR_SELF)
+{
+    ChrDisp(actor, 1);
+}
+
+stock HideActor(actor = ACTOR_SELF)
+{
+    ChrDisp(actor, 0);
+}
+
+stock WarpPlayer(zone, x_bits, y_bits, z_bits)
+{
+    EndConversation();
+    ResetEventBasePos();
+    LoadFieldDLL_();
+    // The destination takes over; no calls may target the old field afterward.
+    MapChangeCore_(zone, x_bits, y_bits, z_bits, 1, 1, 0, 1, 1, 1);
+}
+
+stock AddWorkValue(work, amount)
+{
+    if (work < 16384 || work >= 49152 || amount < 0 || amount > 65535) return 0;
+    new value = WorkGet(work);
+    if (value < 0) value = 0;
+    if (value > 65535 - amount) value = 65535;
+    else value += amount;
+    WorkSet(work, value);
+    return value;
+}
+
+stock SubtractWorkValue(work, amount)
+{
+    if (work < 16384 || work >= 49152 || amount < 0 || amount > 65535) return 0;
+    new value = WorkGet(work);
+    if (value > 65535) value = 65535;
+    if (value < amount) value = 0;
+    else value -= amount;
+    WorkSet(work, value);
+    return value;
+}
+
+stock BuyItem(item, quantity, total_price)
+{
+    if (item <= 0 || item >= 1024 || quantity < 1 || quantity > 999 ||
+        total_price < 1 || total_price > WALLET_LIMIT) return 0;
+    if (PlayerGetMoney() < total_price || !ItemAddCheck(item, quantity)) return 0;
+    if (!ItemAdd(item, quantity)) return 0;
+    // Delivery and payment do not yield to another script.
+    PlayerSubMoney(total_price);
+    return 1;
+}

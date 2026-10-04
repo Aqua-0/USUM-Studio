@@ -15,6 +15,7 @@ struct TargetProfile {
                                 *trainer_teams_archive = "romfs/a/1/0/7";
     static constexpr unsigned trainer_names_member = 110, trainer_classes_member = 111,
                               trainer_record_size = 20, trainer_pokemon_size = 32;
+    static constexpr unsigned personal_record_size = 84, personal_form_count_offset = 32;
     static constexpr unsigned saved_event_flag_count = 4928;
     static constexpr const char *battle_arenas_archive = "romfs/a/0/8/1",
                                 *battle_trainers_archive = "romfs/a/1/7/4";
@@ -25,9 +26,12 @@ struct TargetProfile {
     static constexpr unsigned pokemon_refresh_texture_slot = 3;
     static constexpr const char *refresh_parameters_archive = "romfs/a/2/7/8";
     static constexpr unsigned refresh_options_member = 3, refresh_cameras_member = 9;
-    static constexpr unsigned pokemon_stride = 9, pokemon_names_member = 60,
+    static constexpr unsigned pokemon_stride = 9, pokemon_names_member = 60, move_names_member = 118,
                               pokemon_settings_slot = 8;
+    static constexpr unsigned pokemon_expanded_extra_members = 3;
     static constexpr std::array<unsigned, 4> pokemon_motion_slots{4, 5, 6, 7};
+    static constexpr std::array<unsigned, 3> pokemon_effect_point_slots{29, 37, 24};
+    static constexpr std::array<unsigned, 3> pokemon_decoration_point_slots{30, 38, 25};
     static constexpr std::array<const char *, 4> pokemon_motion_names{"Battle", "Refresh", "Field",
                                                                       "Photo Finder"};
     enum class OutfitVariant { Single, Hat, Legs };
@@ -82,6 +86,8 @@ struct TargetProfile {
         {{1, 34, 5}, {4, 49, 4}, {5, 49, 5}, {6, 49, 2}}};
     static constexpr const char *script_events_archive = "romfs/a/1/5/9";
     static constexpr unsigned static_encounters_member = 1, static_encounter_record_size = 56;
+    static constexpr unsigned pokemon_gifts_member = 0, pokemon_gift_record_size = 20;
+    static constexpr unsigned pokemon_trades_member = 4, pokemon_trade_record_size = 52;
     static constexpr unsigned zone_script_slot = 7;
     static constexpr const char *shared_script_archive = "romfs/a/0/9/2",
                                 *script_routing_archive = "romfs/a/1/4/3";

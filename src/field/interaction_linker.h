@@ -9,6 +9,7 @@ struct InteractionLinkResult {
 };
 struct TrainerInteractionTarget {
     unsigned zone, event;
+    std::vector<unsigned> zones;
 };
 InteractionLinkResult
 link_authored_interaction(View original, View compiled, unsigned script,

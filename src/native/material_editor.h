@@ -35,6 +35,13 @@ class MaterialEditor {
               const std::filesystem::path &working_dump);
     void uvs(const EnvironmentRenderer &renderer, const MaterialSelection &selection);
     void request_leave(std::function<void()> action);
+    void focus_material();
+    void focus_texture(const std::string &name, MaterialSelection &selection);
+    void save_edits();
+    std::string workflow_status() const;
+    int take_resource_request() {
+        return std::exchange(resource_request_, 0);
+    }
     bool take_uv_request() {
         return std::exchange(uv_request_, false);
     }
@@ -51,6 +58,7 @@ class MaterialEditor {
   private:
     void draw_memory(bool details = true);
     int material_page_ = 1;
+    int resource_request_ = 0;
     bool uv_request_ = false, mapping_request_ = false;
     std::map<std::size_t, std::size_t> memory_sizes_;
     std::optional<PokemonMemoryEstimate> memory_;

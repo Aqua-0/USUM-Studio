@@ -29,7 +29,9 @@ void write_steps(std::ostream &out, const std::vector<ConversationStep> &steps) 
         for (auto coordinate : s.destination)
             out << ' ' << coordinate;
         out << ' ' << s.turn_threshold_degrees << ' ' << s.item << ' ' << s.quantity << ' '
-            << s.encounter << ' ' << s.trainer;
+            << s.encounter << ' ' << s.trainer << ' ' << s.gift << ' ' << s.trade << ' '
+            << s.requested_item << ' ' << s.requested_quantity << ' ' << s.species << ' '
+            << s.money << ' ' << s.include_boxes << ' ' << s.warp_zone;
         out << '\n';
         write_steps(out, s.children);
         write_steps(out, s.otherwise);
@@ -51,7 +53,10 @@ std::vector<ConversationStep> read_steps(std::istream &in, unsigned depth, unsig
                                 : version == 2 ? ConversationAction::IfWork
                                 : version == 3 ? ConversationAction::IfBattleResult
                                 : version == 4 ? ConversationAction::TrainerBattle
-                                               : ConversationAction::MenuOption),
+                                : version <= 7 ? ConversationAction::MenuOption
+                                : version == 8 ? ConversationAction::TradeItems
+                                               : version == 9 ? ConversationAction::TakeItem
+                                               : ConversationAction::BuyItem),
                 "Invalid conversation step");
         if (version >= 2) {
             int comparison;
@@ -71,6 +76,14 @@ std::vector<ConversationStep> read_steps(std::istream &in, unsigned depth, unsig
         }
         if (version >= 4)
             require(bool(in >> s.trainer), "Missing trainer battle ID");
+        if (version >= 8)
+            require(bool(in >> s.gift >> s.trade >> s.requested_item >> s.requested_quantity),
+                    "Missing gift or trade parameters");
+        if (version >= 9)
+            require(bool(in >> s.species >> s.money >> s.include_boxes),
+                    "Missing inventory or money parameters");
+        if (version >= 10)
+            require(bool(in >> s.warp_zone), "Missing warp destination zone");
         s.action = ConversationAction(kind);
         s.children = read_steps(in, depth + 1, total, version);
         s.otherwise = read_steps(in, depth + 1, total, version);
@@ -78,9 +91,21 @@ std::vector<ConversationStep> read_steps(std::istream &in, unsigned depth, unsig
     return steps;
 }
 }
+bool conversation_work_action(ConversationAction action) {
+    return action == ConversationAction::SetWork || action == ConversationAction::IfWork ||
+           action == ConversationAction::AddWork || action == ConversationAction::SubtractWork;
+}
+bool conversation_work_id_valid(int id) {
+    return id >= 0x4000 && id < 0xc000;
+}
 bool conversation_branch(ConversationAction action) {
     return action == ConversationAction::Choice || action == ConversationAction::IfFlag ||
            action == ConversationAction::IfWork || action == ConversationAction::GiveItem ||
+           action == ConversationAction::GivePokemon || action == ConversationAction::TradePokemon ||
+           action == ConversationAction::TradeItems || action == ConversationAction::IfPokemon ||
+           action == ConversationAction::IfItem || action == ConversationAction::IfMoney ||
+           action == ConversationAction::GiveMoney || action == ConversationAction::TakeMoney ||
+           action == ConversationAction::TakeItem || action == ConversationAction::BuyItem ||
            action == ConversationAction::Encounter ||
            action == ConversationAction::IfBattleResult ||
            action == ConversationAction::TrainerBattle || action == ConversationAction::Menu;
@@ -184,7 +209,7 @@ void AuthoredInteraction::validate(const ConversationDraft &draft) {
                     "Option branches belong directly inside a menu");
             require(++total <= 4096 && s.id && ids.insert(s.id).second,
                     "Conversation steps need unique IDs and at most 4096 steps");
-            require(int(s.action) >= 0 && int(s.action) <= int(ConversationAction::MenuOption),
+            require(int(s.action) >= 0 && int(s.action) <= int(ConversationAction::BuyItem),
                     "Unknown conversation action");
             if (s.action == ConversationAction::Begin || s.action == ConversationAction::End)
                 require(depth == 0 && (&s == &draft.steps.front() || &s == &draft.steps.back()),
@@ -233,7 +258,7 @@ void AuthoredInteraction::validate(const ConversationDraft &draft) {
             require(s.actor >= -2 && s.actor <= 65535 && s.state_id >= 0 && s.state_id <= 65535,
                     "Use an actor event ID or player, and a state ID from 0 to 65535");
             require(std::isfinite(s.angle), "Rotation must be finite");
-            if (s.action == ConversationAction::MoveTo) {
+            if (s.action == ConversationAction::MoveTo || s.action == ConversationAction::WarpPlayer) {
                 require(std::all_of(s.destination.begin(), s.destination.end(),
                                     [](float value) {
                                         return std::isfinite(value) && std::abs(value) < 1e8f;
@@ -242,9 +267,31 @@ void AuthoredInteraction::validate(const ConversationDraft &draft) {
                 require(std::isfinite(s.turn_threshold_degrees) && s.turn_threshold_degrees >= 0,
                         "Turn animation threshold must be nonnegative and finite");
             }
-            if (s.action == ConversationAction::GiveItem)
+            if (s.action == ConversationAction::GiveItem || s.action == ConversationAction::TradeItems ||
+                s.action == ConversationAction::IfItem || s.action == ConversationAction::TakeItem ||
+                s.action == ConversationAction::BuyItem)
                 require(s.item > 0 && s.item <= 65535 && s.quantity > 0 && s.quantity <= 999,
                         "Choose an item and a quantity from 1 to 999");
+            if (s.action == ConversationAction::IfItem || s.action == ConversationAction::TakeItem ||
+                s.action == ConversationAction::BuyItem)
+                require(s.item < 1024, "Item ID exceeds the supported inventory range");
+            if (s.action == ConversationAction::IfPokemon)
+                require(s.species > 0 && s.species <= 65535, "Choose a Pokemon species");
+            if (s.action == ConversationAction::IfMoney || s.action == ConversationAction::GiveMoney ||
+                s.action == ConversationAction::TakeMoney || s.action == ConversationAction::BuyItem)
+                require(s.money <= 9999999 && (s.action == ConversationAction::IfMoney || s.money > 0),
+                        "Use an amount from 1 to 9,999,999; money conditions also allow zero");
+            if (s.action == ConversationAction::WarpPlayer)
+                require(s.warp_zone < 65535, "Choose a destination zone below 65535");
+            if (s.action == ConversationAction::AddWork || s.action == ConversationAction::SubtractWork)
+                require(s.value >= 0 && s.value <= 65535, "Counter amount must be from 0 to 65535");
+            if (s.action == ConversationAction::TradeItems)
+                require(s.requested_item > 0 && s.requested_item < 1024 && s.item < 1024 &&
+                            s.requested_item != s.item && s.requested_quantity > 0 &&
+                            s.requested_quantity <= 999,
+                        "Choose different requested and offered items, with quantities from 1 to 999");
+            if (s.action == ConversationAction::GivePokemon || s.action == ConversationAction::TradePokemon)
+                require(s.gift <= 65535 && s.trade <= 65535, "Invalid gift or trade record");
             if (s.action == ConversationAction::TrainerBattle)
                 require(s.trainer > 0 && s.trainer <= 65535, "Choose an existing trainer ID");
             if (s.action == ConversationAction::Encounter ||
@@ -304,7 +351,7 @@ bool AuthoredInteraction::redo() {
 std::string AuthoredInteraction::serialize() const {
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << "authored_interaction 7 " << fingerprint_ << ' ' << target_.area << ' '
+    out << "authored_interaction 10 " << fingerprint_ << ' ' << target_.area << ' '
         << target_.local_zone << ' ' << target_.event << ' ' << target_.script << ' '
         << int(target_.kind) << '\n';
     out << draft_.custom << ' ' << std::quoted(draft_.pawn) << '\n'
@@ -332,7 +379,7 @@ void AuthoredInteraction::restore(const std::string &record) {
     ConversationDraft next;
     require(bool(in >> magic >> version >> hash >> target.area >> target.local_zone >>
                  target.event >> target.script) &&
-                magic == "authored_interaction" && (version >= 1 && version <= 7) &&
+                magic == "authored_interaction" && (version >= 1 && version <= 10) &&
                 hash == fingerprint_,
             "Conversation source or target changed; reopen against the matching project source");
     if (version >= 6) {
@@ -450,9 +497,12 @@ AuthoredInteraction::generate(const std::map<std::string, unsigned> &message_ids
             auto call = [&](const std::string &code) {
                 emit(pad + code, s.id);
             };
+            require(!conversation_work_action(s.action) || conversation_work_id_valid(s.state_id),
+                    "Step " + std::to_string(s.id) + ": choose a work ID from 16384 to 49151 before compiling");
             bool character_action = (s.action >= ConversationAction::FacePlayer &&
                                      s.action <= ConversationAction::WaitMotion) ||
-                                    s.action == ConversationAction::MoveTo;
+                                    s.action == ConversationAction::MoveTo || s.action == ConversationAction::ShowActor ||
+                                    s.action == ConversationAction::HideActor;
             require(target_.kind == InteractionTargetKind::Npc ||
                         target_.kind == InteractionTargetKind::Trainer || !character_action ||
                         s.actor != -2,
@@ -471,6 +521,56 @@ AuthoredInteraction::generate(const std::map<std::string, unsigned> &message_ids
                 if (s.wait_for_completion)
                     call("WaitForAction(" + actor + ");");
                 break;
+            case ConversationAction::IfPokemon:
+            case ConversationAction::IfItem:
+            case ConversationAction::IfMoney:
+            case ConversationAction::GiveMoney:
+            case ConversationAction::TakeMoney:
+            case ConversationAction::TakeItem:
+            case ConversationAction::BuyItem: {
+                std::string expression;
+                if (s.action == ConversationAction::BuyItem)
+                    expression = "BuyItem(" + std::to_string(s.item) + ", " +
+                                 std::to_string(s.quantity) + ", " + std::to_string(s.money) + ")";
+                else if (s.action == ConversationAction::IfPokemon)
+                    expression = "HasPokemon(" + std::to_string(s.species) + ", " +
+                                 std::to_string(s.include_boxes) + ")";
+                else if (s.action == ConversationAction::IfItem)
+                    expression = "HasItem(" + std::to_string(s.item) + ", " + std::to_string(s.quantity) + ")";
+                else if (s.action == ConversationAction::TakeItem)
+                    expression = "TakeItem(" + std::to_string(s.item) + ", " + std::to_string(s.quantity) + ")";
+                else if (s.action == ConversationAction::IfMoney)
+                    expression = "PlayerGetMoney() " + std::string(conversation_comparison(s.comparison)) +
+                                 " " + std::to_string(s.money);
+                else
+                    expression = std::string(s.action == ConversationAction::GiveMoney ? "GiveMoney(" : "TakeMoney(") +
+                                 std::to_string(s.money) + ")";
+                call("if (" + expression + ") {");
+                write(s.children, depth + 1);
+                emit(pad + "} else {");
+                write(s.otherwise, depth + 1);
+                emit(pad + "}");
+                break;
+            }
+            case ConversationAction::GivePokemon:
+            case ConversationAction::TradePokemon:
+            case ConversationAction::TradeItems: {
+                std::string expression;
+                if (s.action == ConversationAction::GivePokemon)
+                    expression = "GivePokemon(" + std::to_string(s.gift) + ")";
+                else if (s.action == ConversationAction::TradePokemon)
+                    expression = "TradePokemon(" + std::to_string(s.trade) + ")";
+                else
+                    expression = "TradeItems(" + std::to_string(s.requested_item) + ", " +
+                                 std::to_string(s.requested_quantity) + ", " +
+                                 std::to_string(s.item) + ", " + std::to_string(s.quantity) + ")";
+                call("if (" + expression + ") {");
+                write(s.children, depth + 1);
+                emit(pad + "} else {");
+                write(s.otherwise, depth + 1);
+                emit(pad + "}");
+                break;
+            }
             case ConversationAction::GiveItem:
                 call("if (GiveItem(" + std::to_string(s.item) + ", " + std::to_string(s.quantity) +
                      ")) {");
@@ -533,6 +633,25 @@ AuthoredInteraction::generate(const std::map<std::string, unsigned> &message_ids
             case ConversationAction::SetFlag:
                 call(std::string(s.value ? "FlagSet(" : "FlagReset(") + std::to_string(s.state_id) +
                      ");");
+                break;
+            case ConversationAction::HealParty:
+                call("HealParty();");
+                break;
+            case ConversationAction::ShowActor:
+            case ConversationAction::HideActor:
+                call(std::string(s.action == ConversationAction::ShowActor ? "ShowActor(" : "HideActor(") + actor + ");");
+                break;
+            case ConversationAction::AddWork:
+            case ConversationAction::SubtractWork:
+                call(std::string(s.action == ConversationAction::AddWork ? "AddWorkValue(" : "SubtractWorkValue(") +
+                     std::to_string(s.state_id) + ", " + std::to_string(s.value) + ");");
+                break;
+            case ConversationAction::WarpPlayer:
+                call("WarpPlayer(" + std::to_string(s.warp_zone) + ", " +
+                     std::to_string(std::bit_cast<std::int32_t>(s.destination[0])) + ", " +
+                     std::to_string(std::bit_cast<std::int32_t>(s.destination[1])) + ", " +
+                     std::to_string(std::bit_cast<std::int32_t>(s.destination[2])) + ");");
+                call("return 0;");
                 break;
             case ConversationAction::SetWork:
                 call("WorkSet(" + std::to_string(s.state_id) + ", " + std::to_string(s.value) +

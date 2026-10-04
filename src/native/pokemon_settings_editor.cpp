@@ -629,7 +629,7 @@ void PokemonSettingsEditor::viewport(const ModelDocument &model, double seconds)
     studio::TutorialWidgets::Checkbox("pokemon_settings_editor", "Outlines", &renderer_->outlines);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
-            "Game-style material outlines. Preview only; does not change exported assets.");
+            "Show outline strokes. Summary and Battle still run the shared depth pass when strokes are hidden.");
     ImGui::BeginDisabled(bool(sendout_model_));
     if (camera_mode_ == 0) {
         ImGui::SetNextItemWidth(160);
@@ -717,6 +717,9 @@ void PokemonSettingsEditor::viewport(const ModelDocument &model, double seconds)
         update_battle_shadow(*stage_, range_, far_, shadow_elevation_, shadow_azimuth_);
         for (auto i = range_.shadow_draws; i < range_.shadow_draws + range_.shadow_count; ++i)
             renderer_->set_draw_visible(i, shadows);
+        renderer_->pokemon_preview = preview_settings;
+        renderer_->pokemon_material_begin = range_.materials;
+        renderer_->pokemon_material_end = range_.materials + model.scene->materials.size();
         renderer_->refresh_materials();
         renderer_->upload_step();
         renderer_->playback.seconds = seconds;

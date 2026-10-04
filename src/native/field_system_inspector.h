@@ -1,5 +1,6 @@
 #pragma once
 #include "field/field_systems.h"
+#include "field/field_activity_document.h"
 #include "native/ambient_sound_preview.h"
 #include "native/renderer.h"
 #include "native/pedestrian_editor.h"
@@ -22,6 +23,16 @@ class FieldSystemInspector {
     PedestrianEditor pedestrians;
 
   private:
+    std::unique_ptr<FieldActivityDocument> activities_;
+    ProjectBinding activity_binding_;
+    unsigned pedestrian_revision_ = 0;
+    int activity_selection_ = -1;
+    Bytes activity_draft_;
+    bool activity_pending_ = false;
+    unsigned new_event_ = 0;
+    SpatialPoint new_position_{};
+    void activity_controls(const FieldSystemEntry &);
+    void refresh_activities();
     AmbientSoundPreview audio_;
     std::filesystem::path dump_;
     int audio_entry_ = -1;

@@ -61,7 +61,6 @@ def editor(args):
         "Pawn-compiler-NOTICE.txt": dependencies / "pawn-compiler/compiler/NOTICE",
         "Pawn-Linux-support-LICENSE.txt": ROOT / "cmake/pawn-compiler/support/LICENSE",
         "Pawn-Linux-support-NOTICE.txt": ROOT / "cmake/pawn-compiler/support/NOTICE",
-        "Pawn-Linux-support-provenance.md": ROOT / "cmake/pawn-compiler/support/PROVENANCE.md",
         "BinReloc.txt": ROOT / "cmake/pawn-compiler/support/binreloc.h",
         "DejaVuSans.txt": ROOT / "resources/fonts/LICENSE.txt",
         "Dear-ImGui.txt": dependencies / "imgui/LICENSE.txt",

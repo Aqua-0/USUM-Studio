@@ -1,4 +1,5 @@
 #include "native/conversation_scene_tools.h"
+#include "native/pokemon_record_editor.h"
 #include "native/scene_browser.h"
 #include "assets/model_library.h"
 #include "field/pickup_document.h"
@@ -64,9 +65,13 @@ void ConversationSceneTools::reset() {
     loaded_actor_ = -3;
     motions_.clear();
     items_.clear();
+    warp_catalog_ = {};
+    warp_catalog_loaded_ = false;
     encounters_.clear();
     trainers_.clear();
     species_.clear();
+    gift_records_.clear();
+    trade_records_.clear();
     trainers_loaded_ = false;
     trainer_error_.clear();
     items_loaded_ = encounters_loaded_ = false;
@@ -303,6 +308,13 @@ bool ConversationSceneTools::motion(ConversationStep &step) {
     return changed;
 }
 void ConversationSceneTools::initialize(ConversationStep &step) const {
+    if (step.action == ConversationAction::WarpPlayer) {
+        try {
+            auto zones = load_area_zone_ids(source_, area_);
+            if (zones.contains(zone_))
+                step.warp_zone = unsigned(zones.at(zone_));
+        } catch (const std::exception &) {}
+    }
     if (step.action == ConversationAction::MoveTo) {
         int index = region(step.actor);
         if (index >= 0)
@@ -335,6 +347,58 @@ bool ConversationSceneTools::destination(ConversationStep &step) {
     }
     return changed;
 }
+bool ConversationSceneTools::warp(ConversationStep &step) {
+    if (!warp_catalog_loaded_) {
+        warp_catalog_loaded_ = true;
+        try {
+            warp_catalog_ = load_map_catalog(source_);
+        } catch (const std::exception &e) {
+            warp_catalog_.warning = e.what();
+        }
+    }
+    bool changed = false;
+    auto selected = std::find_if(warp_catalog_.locations.begin(), warp_catalog_.locations.end(),
+                                 [&](const auto &entry) { return entry.zone == int(step.warp_zone); });
+    auto label = selected == warp_catalog_.locations.end() ? "Zone " + std::to_string(step.warp_zone)
+                                                          : selected->name + " / " + std::to_string(selected->zone);
+    if (ImGui::BeginCombo("Destination map", label.c_str())) {
+        ImGui::InputTextWithHint("##warp-filter", "Search map name or zone", warp_filter_, sizeof(warp_filter_));
+        ImGui::BeginChild("warp-maps", {0, 220});
+        for (const auto &entry : warp_catalog_.locations) {
+            if (entry.zone < 0) continue;
+            auto name = entry.name + " / " + std::to_string(entry.zone);
+            if (!matches(name, warp_filter_)) continue;
+            ImGui::PushID(entry.zone);
+            if (ImGui::Selectable(name.c_str(), step.warp_zone == unsigned(entry.zone))) {
+                step.warp_zone = unsigned(entry.zone);
+                if (entry.start) step.destination = *entry.start;
+                changed = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::EndCombo();
+    }
+    int zone = int(step.warp_zone);
+    if (ImGui::InputInt("Destination zone ID", &zone)) {
+        step.warp_zone = unsigned(std::clamp(zone, 0, 65534));
+        changed = true;
+    }
+    changed |= ImGui::InputFloat3("Arrival XYZ", step.destination.data(), "%.3f");
+    ImGui::BeginDisabled(selected == warp_catalog_.locations.end() || !selected->start);
+    if (ImGui::Button("Use map start position")) {
+        step.destination = *selected->start;
+        changed = true;
+    }
+    ImGui::EndDisabled();
+    if (selected != warp_catalog_.locations.end() && !selected->start)
+        ImGui::TextWrapped("This map has no start position; enter a walkable arrival position.");
+    ImGui::TextWrapped("Fades to the destination and ends this interaction. Steps after the warp do not run. "
+                       "Coordinates are in the destination map's world space.");
+    if (!warp_catalog_.warning.empty()) ImGui::TextWrapped("%s", warp_catalog_.warning.c_str());
+    return changed;
+}
 bool ConversationSceneTools::reward(ConversationStep &step) {
     if (!items_loaded_) {
         items_loaded_ = true;
@@ -346,7 +410,19 @@ bool ConversationSceneTools::reward(ConversationStep &step) {
             item_error_ = e.what();
         }
     }
-    bool changed = choice("Item", step.item, items_, item_filter_, false);
+    bool changed = false;
+    if (step.action == ConversationAction::TradeItems) {
+        ImGui::TextUnformatted("Player gives");
+        changed |= choice("Requested item", step.requested_item, items_, requested_item_filter_, false);
+        int requested = int(step.requested_quantity);
+        if (ImGui::InputInt("Requested quantity", &requested)) {
+            step.requested_quantity = unsigned(std::clamp(requested, 1, 999));
+            changed = true;
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted("Player receives");
+    }
+    changed |= choice("Item", step.item, items_, item_filter_, false);
     int id = int(step.item), quantity = int(step.quantity);
     if (ImGui::InputInt("Item ID", &id)) {
         step.item = unsigned(std::max(1, id));
@@ -356,11 +432,82 @@ bool ConversationSceneTools::reward(ConversationStep &step) {
         step.quantity = unsigned(std::clamp(quantity, 1, 999));
         changed = true;
     }
-    ImGui::TextWrapped("Checks bag capacity before adding. Put dialogue and completion flags in "
+    if (step.action == ConversationAction::TradeItems)
+        ImGui::TextWrapped("The requested items are refunded if delivery fails. Add a Yes/No question "
+                           "before this step to ask permission; put completion flags in Traded.");
+    else if (step.action == ConversationAction::IfItem)
+        ImGui::TextWrapped("True when the bag contains at least this quantity. Held items do not count. "
+                           "Nest another condition in True to require both items.");
+    else if (step.action == ConversationAction::TakeItem)
+        ImGui::TextWrapped("Removes the full quantity only when enough are in the bag. "
+                           "For rewards, check requirements first and remove items only after successful delivery.");
+    else ImGui::TextWrapped("Checks bag capacity before adding. Put dialogue and completion flags in "
                        "the Given branch; use Not given for a full bag or failed delivery.");
     if (!item_error_.empty())
         ImGui::TextWrapped("%s", item_error_.c_str());
     return changed;
+}
+bool ConversationSceneTools::pokemon_condition(ConversationStep &step) {
+    bool changed = false;
+    try {
+        if (species_.empty())
+            species_ = decode_location_text(Archive(source_ / TargetProfile::location_text_archive)
+                                               .decoded(TargetProfile::pokemon_names_member));
+        changed |= choice("Species", step.species, species_, reward_filter_, false);
+    } catch (const std::exception &e) {
+        ImGui::TextWrapped("%s", e.what());
+    }
+    int species = int(step.species);
+    if (ImGui::InputInt("Species ID", &species)) {
+        step.species = unsigned(std::clamp(species, 1, 65535));
+        changed = true;
+    }
+    int scope = step.include_boxes ? 1 : 0;
+    if (ImGui::Combo("Search", &scope, "Party only\0Party or boxes\0")) {
+        step.include_boxes = scope == 1;
+        changed = true;
+    }
+    ImGui::TextWrapped("Checks current Pokemon, excluding eggs. Any form counts; fainted party members count. "
+                       "Nest another condition in True to require both species.");
+    return changed;
+}
+bool ConversationSceneTools::pokemon_reward(ConversationStep &step) {
+    bool gift = step.action == ConversationAction::GivePokemon;
+    try {
+        if (species_.empty())
+            species_ = decode_location_text(Archive(source_ / TargetProfile::location_text_archive)
+                                               .decoded(TargetProfile::pokemon_names_member));
+        auto &records = gift ? gift_records_ : trade_records_;
+        if (records.empty()) {
+            auto bytes = Archive(source_ / TargetProfile::script_events_archive)
+                             .raw(gift ? TargetProfile::pokemon_gifts_member : TargetProfile::pokemon_trades_member);
+            unsigned stride = gift ? TargetProfile::pokemon_gift_record_size : TargetProfile::pokemon_trade_record_size;
+            require(bytes.size() % stride == 0, "Invalid Pokemon reward table");
+            for (unsigned offset = 0; offset < bytes.size(); offset += stride) {
+                auto kind = gift ? PokemonRecordKind::Gift : PokemonRecordKind::Trade;
+                auto edited = records_ ? records_->record(source_, kind, offset / stride) : project_pokemon_record(source_, kind, offset / stride);
+                auto row = edited.bytes();
+                unsigned species = u16(row, 0);
+                std::string label = std::to_string(offset / stride) + " / " +
+                                    (species < species_.size() ? species_[species] : "Unknown species");
+                if (gift) label += " / Lv. " + std::to_string(row[3]);
+                records.push_back(std::move(label));
+            }
+        }
+        bool changed = choice(gift ? "Gift record" : "Trade record", gift ? step.gift : step.trade,
+                              records, reward_filter_, true);
+        if (records_ && ImGui::Button("Edit selected record..."))
+            records_->open(source_, gift ? PokemonRecordKind::Gift : PokemonRecordKind::Trade, gift ? step.gift : step.trade);
+        ImGui::TextWrapped(gift
+            ? "Uses the gift record's Pokemon and level. Delivery requires room in the party or boxes. "
+              "Put completion flags in Given to make a one-time gift."
+            : "Opens Pokemon selection and checks the trade record's requirements. Add a Yes/No "
+              "question before this step; put completion flags in Traded to prevent repeats.");
+        return changed;
+    } catch (const std::exception &e) {
+        ImGui::TextWrapped("%s", e.what());
+        return false;
+    }
 }
 std::string ConversationSceneTools::text_token() {
     if (ImGui::Combo(
@@ -451,6 +598,16 @@ bool ConversationSceneTools::trainer(ConversationStep &step) {
         trainers_loaded_ = true;
         try {
             trainers_ = load_trainer_battles(source_);
+            for (auto &entry : trainers_) {
+                if (!entry.error.empty()) continue;
+                bool saved = project_store() && !project_store()->document("pokemon-record/2/" + std::to_string(entry.id)).empty();
+                if (!saved && !(records_ && records_->editing(PokemonRecordKind::Trainer, entry.id))) continue;
+                auto edited = records_ ? records_->record(source_, PokemonRecordKind::Trainer, entry.id) : project_pokemon_record(source_, PokemonRecordKind::Trainer, entry.id);
+                for (std::size_t slot = 0; slot < entry.team.size(); ++slot) {
+                    auto at = slot * TargetProfile::trainer_pokemon_size;
+                    entry.team[slot] = {u16(edited.bytes(), at + 16), edited.bytes()[at + 18], edited.bytes()[at + 14]};
+                }
+            }
             species_ = decode_location_text(Archive(source_ / TargetProfile::location_text_archive)
                                                 .decoded(TargetProfile::pokemon_names_member));
         } catch (const std::exception &e) {
@@ -489,6 +646,8 @@ bool ConversationSceneTools::trainer(ConversationStep &step) {
     selected = std::find_if(trainers_.begin(), trainers_.end(), [&](const auto &entry) {
         return entry.id == step.trainer;
     });
+    if (records_ && ImGui::Button("Edit trainer team..."))
+        records_->open(source_, PokemonRecordKind::Trainer, step.trainer);
     if (selected != trainers_.end()) {
         if (!selected->error.empty())
             ImGui::TextWrapped("%s", selected->error.c_str());

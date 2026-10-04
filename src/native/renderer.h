@@ -1,5 +1,6 @@
 #pragma once
 #include "scene/environment.h"
+#include "scene/pokemon_preview.h"
 #include "scene/player.h"
 #include "native/post_process.h"
 #include "native/particle_renderer.h"
@@ -11,8 +12,14 @@
 #include <set>
 #include <algorithm>
 namespace studio {
+enum class ShadingView {
+    Shaded, MaterialColor, MaterialAlpha, Texture, VertexColor, VertexAlpha,
+    Normals, MappedNormals, Tangents, UVs, DiffuseLighting, SpecularLighting
+};
 class EnvironmentRenderer {
   public:
+    PokemonPreviewSettings pokemon_preview;
+    std::size_t pokemon_material_begin = 0, pokemon_material_end = std::size_t(-1);
     SpatialOverlay spatial;
     RefreshOverlay refresh;
     PlayerController player;
@@ -39,6 +46,9 @@ class EnvironmentRenderer {
     bool retain_frame_during_upload = false;
     bool pica_texture_precision = false;
     float outline_width = 1.f;
+    ShadingView shading_view = ShadingView::Shaded;
+    int inspection_texture = 0, inspection_channel = 0, inspection_uv = 0;
+    bool inspection_alpha_test = false;
     void invalidate_selection_readback() {
         ++scene_generation_;
     }
@@ -83,7 +93,8 @@ class EnvironmentRenderer {
     std::vector<bool> hidden_draws_;
     int selected_draw_ = -1;
     std::vector<bool> highlighted_;
-    bgfx::UniformHandle selection_color_, edge_options_, texture_precision_;
+    bgfx::UniformHandle selection_color_, edge_options_, texture_precision_, inspection_;
+    bool edge_depth_shared_ = false;
     bgfx::FrameBufferHandle edge_target_ = BGFX_INVALID_HANDLE;
     PostProcess post_;
     ParticleRenderer particles_;

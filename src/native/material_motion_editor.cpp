@@ -87,7 +87,7 @@ void MaterialMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
         repeat = false;
         preview.select_motion(preview.motion, false);
         if (daily)
-            renderer.lighting.hour = float(frame) * 24 / motion.frames;
+            renderer.lighting.hour = motion.frames > 0 ? float(frame) * 24 / motion.frames : 0;
         else
             renderer.playback.seconds = frame / 30.;
         renderer.playback.materials = true;
@@ -154,6 +154,67 @@ void MaterialMotionEditor::draw(MaterialDocument &doc, ModelDocument &preview,
             slope_ = key.slope;
         }
     };
+    std::vector<PropertyGraphTrack> graph_tracks;
+    for (unsigned i = 0; i < motion.tracks.size(); ++i) {
+        const auto &t = motion.tracks[i];
+        if (!local(t))
+            continue;
+        for (int c = 0; c < channel_count(t); ++c) {
+            if (!key_count(t, c))
+                continue;
+            PropertyGraphTrack row;
+            row.name = t.material + " / " +
+                       (t.kind == MaterialTrack::Kind::TextureTransform ? "UV "
+                        : t.kind == MaterialTrack::Kind::ConstantColor  ? "Color "
+                                                                        : "Texture ") +
+                       std::to_string(t.slot);
+            if (t.kind != MaterialTrack::Kind::TexturePattern)
+                row.name += " / " + std::string(channel_name(t, c));
+            row.source = int(i);
+            row.channel = c;
+            row.group = int(t.kind);
+            if (t.kind == MaterialTrack::Kind::TexturePattern) {
+                for (auto &key : t.textures)
+                    row.steps.push_back({float(key.frame), key.texture});
+            } else
+                row.curve = &t.curves[c];
+            graph_tracks.push_back(std::move(row));
+        }
+    }
+    std::string active_graph_track;
+    for (auto &row : graph_tracks)
+        if (label(motion.tracks[row.source]) == track_ && row.channel == channel_)
+            active_graph_track = row.name;
+    auto combined = tracks_.draw(graph_tracks, identity, motion.frames, float(frame),
+                                 active_graph_track, false, playing, error_);
+    if (combined.frame >= 0) {
+        frame = combined.frame;
+        scrub(frame);
+    }
+    if (combined.selected >= 0) {
+        const auto &row = graph_tracks.at(combined.selected);
+        const auto &t = motion.tracks[row.source];
+        select_channel(t, row.channel);
+        key_frame_ = frame;
+        if (row.curve) {
+            value_ = row.curve->sample(float(frame), 0);
+            slope_ = 0;
+            for (auto &key : row.curve->keys)
+                if (key.frame == frame)
+                    slope_ = key.slope;
+        } else
+            for (auto &key : t.textures)
+                if (key.frame <= unsigned(frame))
+                    texture_ = key.texture;
+    }
+    if (combined.action != PropertyGraphResult::Action::None) {
+        try {
+            apply(edit_material_graph_range(motion, graph_tracks, combined));
+            motion = preview.motions.at(index).material;
+        } catch (const std::exception &e) {
+            error_ = e.what();
+        }
+    }
     if (ImGui::Button("Animate mapping..."))
         mapping_request_ = true;
     ImGui::BeginDisabled(daily || preview.scene->materials.empty());

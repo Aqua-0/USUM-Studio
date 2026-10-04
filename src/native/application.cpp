@@ -7,6 +7,7 @@
 #include "native/tutorial_controller.h"
 #include "native/project_workspace.h"
 #include "native/overworld_editor.h"
+#include "native/related_data_inspector.h"
 #include "native/encounter_editor.h"
 #include "native/map_cursor.h"
 #include "native/camera_editor.h"
@@ -697,7 +698,10 @@ int run(SDL_Window *window, int argc, char **argv, studio::ApplicationObserver *
     Camera camera;
     bool player_hovered = false;
     studio::InteractionInspector interaction_inspector;
+    studio::RelatedDataInspector related_data;
+    std::optional<studio::RelatedMapTarget> pending_related;
     studio::ConversationEditor conversation_editor;
+    projects.conversations(conversation_editor);
     studio::WarpEditor warps(renderer);
     studio::PickupEditor pickups(renderer);
     studio::WeatherEditor weather_editor;
@@ -1144,6 +1148,39 @@ int run(SDL_Window *window, int argc, char **argv, studio::ApplicationObserver *
             if (!found)
                 camera_notice = "Destination entrance was not found in the loaded map.";
             pending_entrance_zone = -1;
+        }
+        if (!job.valid()) {
+            if (auto request = related_data.take_request()) {
+                if (int(request->area) == loaded_area) pending_related = request;
+                else {
+                    auto target_dump = loaded_dump;
+                    auto target_archives = scene->archive_sources;
+                    load(false, [&, request, target_dump, target_archives] {
+                        auto path = target_dump.u8string();
+                        studio::require(path.size() < sizeof(source), "Dump path is too long");
+                        std::memcpy(source, path.c_str(), path.size() + 1);
+                        source_archives = target_archives;
+                        area = int(request->area); selected_zone = request->zone; pending_related = request;
+                    });
+                }
+            }
+            if (pending_related && !job.valid() && scene && int(pending_related->area) == loaded_area) {
+                bool found = false;
+                for (std::size_t i = 0; i < scene->spatial.regions.size(); ++i) {
+                    const auto &region = scene->spatial.regions[i];
+                    if (!region.overworld) continue;
+                    const auto &ref = *region.overworld;
+                    if (ref.category != pending_related->category || ref.local_zone != pending_related->local_zone ||
+                        ref.row != pending_related->row || ref.event != pending_related->event) continue;
+                    selection = {}; renderer.spatial.selected = int(i);
+                    renderer.spatial.enabled[unsigned(region.kind)] = true;
+                    browser.frame_selection(*scene, renderer, selection, camera);
+                    map_page = studio::MapInspectorPage::Selection; map_materials = false;
+                    found = true; break;
+                }
+                if (!found) camera_notice = "The referenced placement is not present in the loaded area. Refresh its dependency scan.";
+                pending_related.reset();
+            }
         }
         if (renderer.spatial.destination_zone >= 0 && !job.valid()) {
             auto target = renderer.spatial.destination_zone;
@@ -2082,6 +2119,13 @@ int run(SDL_Window *window, int argc, char **argv, studio::ApplicationObserver *
                 ImGui::End();
                 if (map_region_details)
                     layers_changed |= renderer.spatial.controls(camera, loaded_zone, true);
+            }
+            if (properties && scene && !job.valid() && !overworld.preview_busy()) {
+                ImGui::Begin("Map inspector");
+                related_data.draw(*scene, loaded_dump, unsigned(loaded_area), renderer);
+                if (studio::related_data_inspector(*scene, selection, renderer))
+                    browser.frame_selection(*scene, renderer, selection, camera);
+                ImGui::End();
             }
             if (layers_changed) {
                 for (unsigned i = 0; i < renderer.spatial.enabled.size(); ++i) {

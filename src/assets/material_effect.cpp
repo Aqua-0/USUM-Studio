@@ -137,7 +137,8 @@ Bytes rename_material(View old, const std::map<std::string, std::string> &materi
             put32(b, header + 32 + c.offset, (c.value & ~0xff0000u) | (unsigned(stencil) << 16));
     return section("material", b);
 }
-Bytes renamed_mesh(View old, const std::string &mesh, const std::string &material) {
+Bytes renamed_mesh(View old, const std::string &mesh, const std::string &material,
+                   const std::map<std::string, std::string> *mapping = nullptr) {
     Bytes b(old.begin(), old.begin() + 144);
     put32(b, 16, hash(mesh));
     std::fill(b.begin() + 20, b.begin() + 84, 0);
@@ -151,13 +152,14 @@ Bytes renamed_mesh(View old, const std::string &mesh, const std::string &materia
     }
     for (unsigned i = 0; i < count; ++i) {
         auto length = u32(old, p + 4);
+        auto assigned = mapping ? mapping->at(text(slice(old, p + 8, length))) : material;
         p += 8 + length;
-        auto padded = aligned(material.size() + 1, 16);
-        append32(b, hash(material));
+        auto padded = aligned(assigned.size() + 1, 16);
+        append32(b, hash(assigned));
         append32(b, narrow(padded));
         auto at = b.size();
         b.resize(at + padded);
-        std::copy(material.begin(), material.end(), b.begin() + at);
+        std::copy(assigned.begin(), assigned.end(), b.begin() + at);
         append(b, slice(old, p, 48));
         p += 48;
     }
@@ -321,14 +323,15 @@ Bytes merge_loop(View old, View donor, const std::map<std::string, std::string> 
     return b;
 }
 }
-MaterialEffectResult borrow_material_effect(const ModelDocument &target,
-                                            std::size_t target_material, const ModelDocument &donor,
-                                            const std::vector<std::size_t> &donor_materials,
-                                            bool keep_original) {
+static MaterialEffectResult
+transfer_material_resources(const ModelDocument &target, std::size_t target_material,
+                            const ModelDocument &donor,
+                            const std::vector<std::size_t> &donor_materials, bool keep_original,
+                            const Bytes *mesh_model = nullptr) {
     require(target.area < 0 && donor.area < 0,
             "Material effect bundles currently support Pokemon models");
     require(!donor_materials.empty(), "Select at least one donor material pass");
-    require(donor_materials.size() <= 8, "Select at most eight material passes");
+    require(mesh_model || donor_materials.size() <= 8, "Select at most eight material passes");
     std::set<std::size_t> selected(donor_materials.begin(), donor_materials.end());
     require(selected.size() == donor_materials.size(), "Duplicate material pass");
     MaterialEffectResult result;
@@ -426,7 +429,7 @@ MaterialEffectResult borrow_material_effect(const ModelDocument &target,
         auto &m = donor.scene->materials.at(index);
         require(m.combiner.present && m.combiner.unsupported.empty() && !m.unsupported_mapping,
                 "Donor material has unsupported preview inputs");
-        require(!m.height_tint && !m.screen_refraction,
+        require(mesh_model || (!m.height_tint && !m.screen_refraction),
                 "This effect needs geometry-specific vertex parameters");
         if (m.stencil_test & 1)
             donor_stencils.insert((m.stencil_test >> 16) & 255);
@@ -493,7 +496,7 @@ MaterialEffectResult borrow_material_effect(const ModelDocument &target,
                     match |= draw.material == target_material;
                     other |= draw.material != target_material;
                 }
-            if (!match) {
+            if (mesh_model || !match) {
                 names[3].push_back(mesh);
                 meshes.emplace_back(raw.begin(), raw.end());
                 continue;
@@ -520,7 +523,18 @@ MaterialEffectResult borrow_material_effect(const ModelDocument &target,
                 first = false;
             }
         }
-    require(replaced > 0, "The selected target material has no meshes");
+    if (mesh_model) {
+        auto imported = Model::parse(*mesh_model);
+        for (const auto &s : imported.sections)
+            if (s.kind == "mesh") {
+                auto raw = slice(*mesh_model, s.offset, s.size);
+                auto name = unique_name(prefix, text(slice(raw, 20, 64)), used);
+                names[3].push_back(name);
+                meshes.push_back(renamed_mesh(raw, name, "", &materials));
+                ++replaced;
+            }
+    }
+    require(replaced > 0, "The selected material has no meshes");
     Bytes assembled(model.original.begin(), model.original.begin() + 16);
     put32(assembled, 4, narrow(1 + mats.size() + meshes.size()));
     append(assembled, metadata(model, names, imported_tables));
@@ -530,6 +544,17 @@ MaterialEffectResult borrow_material_effect(const ModelDocument &target,
         append(assembled, b);
     assembled.resize(aligned(assembled.size(), 128));
     auto check = Model::parse(assembled);
+    if (mesh_model) {
+        const auto imported = SkinnedModel::parse(*mesh_model);
+        for (const auto &mesh : imported.meshes)
+            for (const auto &vertex : mesh.vertices)
+                for (unsigned k = 0; k < 3; ++k) {
+                    auto low = check.bounds_offset + k * 4;
+                    auto high = low + 16;
+                    put_float(assembled, low, std::min(f32(assembled, low), vertex.position[k]));
+                    put_float(assembled, high, std::max(f32(assembled, high), vertex.position[k]));
+                }
+    }
     require(check.bones == model.bones, "Effect import changed the skeleton");
     model_lighting_tables(check);
     pack.files[0] = std::move(assembled);
@@ -592,4 +617,48 @@ MaterialEffectResult borrow_material_effect(const ModelDocument &target,
                      std::to_string(loops) + " looping motions onto " + target_name + ".";
     return result;
 }
+MaterialEffectResult borrow_material_effect(const ModelDocument &target,
+                                            std::size_t target_material, const ModelDocument &donor,
+                                            const std::vector<std::size_t> &donor_materials,
+                                            bool keep_original) {
+    return transfer_material_resources(target, target_material, donor, donor_materials,
+                                       keep_original);
+}
+MaterialEffectResult copy_model_meshes(const ModelDocument &target, const ModelDocument &donor,
+                                       const std::set<std::size_t> &draws, unsigned bone) {
+    require(target.is_pokemon() && donor.is_pokemon() && !target.shadow_model &&
+                !donor.shadow_model,
+            "Copy meshes between main Pokemon models");
+    require(!draws.empty(), "Choose meshes to copy");
+    auto target_link = target.resources.at(target.material_resources.at(0));
+    auto donor_link = donor.resources.at(donor.material_resources.at(0));
+    auto raw = source_resource(donor, donor_link);
+    auto exchange = decode_model_exchange(raw);
+    auto skeleton = SkinnedModel::parse(source_resource(target, target_link));
+    require(bone < skeleton.joints.size(), "Choose a destination bone");
+    auto source_skin = SkinnedModel::parse(raw);
+    exchange.joints = skeleton.joints;
+    auto source_meshes = std::move(exchange.meshes);
+    exchange.meshes.clear();
+    std::set<std::size_t> materials;
+    for (auto draw : draws) {
+        auto native = donor.native_meshes.empty() ? draw : donor.native_meshes.at(draw);
+        auto mesh = source_meshes.at(native);
+        require(mesh.influences > 0, "This mesh has no bone attachment channels");
+        for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+            auto &v = mesh.vertices[i];
+            const auto &source = source_skin.meshes.at(native).vertices.at(i);
+            for (unsigned k = 0; k < 3; ++k)
+                v.channels[0][k] = source.bind_position[k];
+            v.joints = {std::uint16_t(bone), 0, 0, 0};
+            v.weights = {1, 0, 0, 0};
+        }
+        exchange.meshes.push_back(std::move(mesh));
+        materials.insert(donor.scene->draws.at(draw).material);
+    }
+    auto bound = replace_model_exchange(raw, exchange, false);
+    return transfer_material_resources(target, 0, donor, {materials.begin(), materials.end()}, true,
+                                       &bound);
+}
+
 }

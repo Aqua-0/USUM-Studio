@@ -79,7 +79,8 @@ std::vector<InteractionUse> shared_script_uses(const std::filesystem::path &dump
     const Layout layouts[] = {{TargetProfile::position_event_pack, 60, 44, "Position trigger"},
                               {TargetProfile::character_placement_pack, 120, 56, "NPC"},
                               {TargetProfile::interaction_placement_pack, 60, 48, "Scenery"},
-                              {TargetProfile::trainer_placement_pack, 84, 52, "Trainer"}};
+                              {TargetProfile::trainer_placement_pack, 84, 52, "Trainer"},
+                              {TargetProfile::contact_placement_pack, 152, 56, "Contact Pokemon"}};
     for (unsigned area = 0; std::size_t(area) * TargetProfile::area_stride < field.size(); ++area) {
         auto ed = Container::parse(
             field.decoded(area * TargetProfile::area_stride + TargetProfile::placement_slot), "ED");

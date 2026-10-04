@@ -106,8 +106,8 @@ GroundExportResult compile_ground_patch(const std::filesystem::path &dump,
         return found;
     };
     ids = members(document.catalog().area);
-    require(ids.size() == 1, "This first ground exporter needs a map with one terrain resource. "
-                             "Use Berry Fields for the traversal test.");
+    require(ids.size() == 1, "Custom ground export requires one terrain resource. "
+                             "Choose a single-resource template to create custom ground.");
     const auto member = *ids.begin();
     for (unsigned area = 0; area < field.size() / TargetProfile::area_stride; ++area)
         if (area != document.catalog().area) {
@@ -132,7 +132,7 @@ GroundExportResult compile_ground_patch(const std::filesystem::path &dump,
                         "Keep the ground patch over the template's existing walkable ground");
                 require(
                     p[1] >= (*hit)[1] - .01f,
-                    "The first ground patch exporter retains the original floor. Raise the patch "
+                    "Ground patches retain the original floor. Raise the patch "
                     "to the original ground or above it.");
             }
     auto palette = load_ground_textures(dump, *scene);

@@ -1,4 +1,5 @@
 #pragma once
+#include "native/property_track_graph.h"
 #include <utility>
 #include "assets/material_document.h"
 #include "native/renderer.h"
@@ -17,6 +18,7 @@ class MaterialMotionEditor {
     }
 
   private:
+    PropertyTrackGraph tracks_;
     bool mapping_request_ = false;
     bool graph_expanded_ = false;
     std::string identity_, track_, error_, texture_;

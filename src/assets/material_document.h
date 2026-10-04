@@ -1,8 +1,11 @@
 #pragma once
+#include "assets/studio_resources.h"
 #include "assets/model_document.h"
 #include "assets/model_exchange.h"
 #include "assets/face_materials.h"
 #include "assets/motion_exchange.h"
+#include "assets/pokemon_effect_points.h"
+#include "assets/pokemon_decoration_points.h"
 #include <set>
 namespace studio {
 struct TextureEdit {
@@ -71,6 +74,7 @@ class MaterialDocument {
         return cursor_ + 1 < history_.size() || bool(structural_redo_);
     }
     bool dirty() const;
+    std::vector<StudioResourceChange> resource_changes() const;
     bool changed() const {
         return !map_motion_edits_.empty() || edits_ != initial_ || !texture_edits_.empty() ||
                !refresh_edits_.empty() || !camera_edit_.empty() || feeding_edit_.has_value() ||
@@ -105,12 +109,21 @@ class MaterialDocument {
     void import_new_model(const ModelExchange &replacement,
                           const std::vector<std::size_t> &materials);
     void edit_skeleton(const std::vector<Joint> &joints);
+    void edit_effect_point(unsigned group, const PokemonEffectPoint &point);
+    void add_effect_point(unsigned group, const PokemonEffectPoint &point);
+    void remove_effect_point(unsigned group, std::size_t record);
+    void edit_decoration_point(unsigned group, std::size_t record, const PokemonDecorationPoint &point);
+    void add_decoration_point(unsigned group, const PokemonDecorationPoint &point);
+    void remove_decoration_point(unsigned group, std::size_t record);
     void edit_visibility_motion(std::size_t index, const VisibilityMotion &replacement);
     void edit_geometry(const SkinnedModel &replacement);
     void edit_skeletal_motion(std::size_t motion, const SkeletalMotion &replacement);
     void edit_material_motion(std::size_t motion, const MaterialMotion &replacement);
     std::string borrow_effect(std::size_t material, const MaterialDocument &donor,
                               const std::vector<std::size_t> &passes, bool keep_original = false);
+    void repair_runtime_depth();
+    void copy_meshes(const MaterialDocument &donor, const std::set<std::size_t> &draws,
+                     unsigned bone);
     std::string serialize() const;
     void restore(const std::string &text);
     Bytes compile() const;
@@ -177,6 +190,8 @@ class MaterialDocument {
     std::string serialize_materials() const;
     void adopt_structure(MaterialDocument next);
     void replace_members(const std::map<std::size_t, Bytes> &members);
+    void validate_point_parent(const std::string &bone) const;
+    void replace_point_table(std::size_t source, std::size_t child, View original, const Bytes &replacement);
     struct StructuralSession {
         std::map<std::size_t, Bytes> originals;
         std::map<std::size_t, std::set<std::string>> accepted;
@@ -208,6 +223,7 @@ class MaterialDocument {
     std::size_t cursor_ = 0;
     std::uint64_t revision_ = 0, texture_revision_ = 0;
 };
+Bytes normalize_material_depth_commands(View model);
 Bytes asset_resource(View member, const std::vector<std::size_t> &path);
 Bytes replace_asset_resource(View member, const std::vector<std::size_t> &path, View replacement);
 }

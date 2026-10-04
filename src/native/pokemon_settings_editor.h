@@ -19,6 +19,7 @@ class PokemonSettingsEditor {
     void draw();
     void request_leave(std::function<void()> action);
     void viewport(const ModelDocument &model, double seconds);
+    PokemonPreviewSettings preview_settings;
     bool active = false, shadows = true;
     bool sendout_active() const {
         return bool(sendout_model_) || sendout_job_.valid();
