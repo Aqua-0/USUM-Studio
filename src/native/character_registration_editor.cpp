@@ -3,6 +3,7 @@
 #include "assets/model_library.h"
 #include "native/project_binding.h"
 #include <imgui.h>
+#include <algorithm>
 namespace studio {
 bool CharacterRegistrationEditor::accepts(const ModelDocument &donor) {
     return donor.kind == ModelAssetKind::ArchiveModel && donor.area < 0 && !donor.sources.empty() &&
